@@ -1,0 +1,318 @@
+----------------------------------------------------------------------------------------------------
+Generated program:
+# Code block 0
+import numpy as np
+
+# Step 1: Get observation
+obs = get_observation()
+rgb = obs["robot0_robotview"]["images"]["rgb"]
+depth = obs["robot0_robotview"]["images"]["depth"]
+intrinsics = obs["robot0_robotview"]["intrinsics"]
+extrinsics = obs["robot0_robotview"]["pose_mat"]
+
+print(f"Image shape: {rgb.shape}")
+print(f"Depth shape: {depth.shape}")
+
+# Step 2: Segment the red cube
+masks = segment_sam3_text_prompt(rgb, "red cube")
+print(f"Number of segments found: {len(masks)}")
+
+if len(masks) == 0:
+    print("ERROR: No segmentation found for 'red cube'!")
+else:
+    for i, m in enumerate(masks):
+        print(f"  Segment {i}: score={m['score']:.3f}, box={m.get('box', 'N/A')}")
+    
+    # Select the best segment
+    best_seg = max(masks, key=lambda d: d["score"])
+    mask = best_seg["mask"]
+    print(f"Best mask: {mask.sum()} pixels")
+    
+    # Step 3: Plan grasp
+    # Convert boolean mask to int32 (plan_grasp expects integer instance IDs > 0)
+    seg_map = mask.astype(np.int32)
+    grasp_poses, grasp_scores = plan_grasp(depth, intrinsics, seg_map)
+    print(f"Found {len(grasp_poses)} grasp candidates")
+    
+    if len(grasp_poses) == 0:
+        print("ERROR: No grasp candidates found!")
+    else:
+        # Step 4: Select top-down grasp
+        best_grasp_world, best_score = select_top_down_grasp(grasp_poses, grasp_scores, extrinsics)
+        
+        if best_grasp_world is not None:
+            print(f"Selected top-down grasp with score: {best_score:.3f}")
+        else:
+            print("No top-down grasp found, falling back to best-score grasp")
+            best_idx = grasp_scores.argmax()
+            best_grasp_world = extrinsics @ grasp_poses[best_idx]
+            print(f"Using best-score grasp: {grasp_scores[best_idx]:.3f}")
+        
+        print(f"Grasp pose (world):\n{best_grasp_world}")
+        
+        # Step 5: Decompose grasp pose into position and orientation
+        grasp_pos, grasp_quat = decompose_transform(best_grasp_world)
+        print(f"Grasp position: {grasp_pos}")
+        print(f"Grasp quaternion (wxyz): {grasp_quat}")
+        
+        # Step 6: Define approach and lift positions (world z-up for top-down)
+        approach_offset = np.array([0.0, 0.0, 0.10])  # 10 cm above grasp point
+        lift_offset = np.array([0.0, 0.0, 0.15])       # 15 cm above grasp point
+        
+        approach_pos = grasp_pos + approach_offset
+        lift_pos = grasp_pos + lift_offset
+        
+        print(f"Approach position: {approach_pos}")
+        print(f"Lift position: {lift_pos}")
+        
+        # Step 7: Open gripper before approaching (safety)
+        open_gripper()
+        print("Gripper opened")
+        
+        # Step 8: Move to approach position (above the cube)
+        approach_joints = solve_ik(approach_pos, grasp_quat)
+        print(f"Approach joints: {approach_joints}")
+        move_to_joints(approach_joints)
+        print("Moved to approach position")
+        
+        # Step 9: Lower to grasp position
+        grasp_joints = solve_ik(grasp_pos, grasp_quat)
+        print(f"Grasp joints: {grasp_joints}")
+        move_to_joints(grasp_joints)
+        print("Moved to grasp position")
+        
+        # Step 10: Close gripper to grasp the cube
+        close_gripper()
+        print("Gripper closed - grasping cube")
+        
+        # Step 11: Lift the cube
+        lift_joints = solve_ik(lift_pos, grasp_quat)
+        print(f"Lift joints: {lift_joints}")
+        move_to_joints(lift_joints)
+        print("Cube lifted successfully!")
+
+# Code block 1
+import numpy as np
+
+# Step 1: Get fresh observation
+obs = get_observation()
+rgb = obs["robot0_robotview"]["images"]["rgb"]
+depth = obs["robot0_robotview"]["images"]["depth"]
+intrinsics = obs["robot0_robotview"]["intrinsics"]
+extrinsics = obs["robot0_robotview"]["pose_mat"]
+
+# Step 2: Segment the red cube
+masks = segment_sam3_text_prompt(rgb, "red cube")
+best_seg = max(masks, key=lambda d: d["score"])
+mask = best_seg["mask"]
+print(f"Best mask: {mask.sum()} pixels, score={best_seg['score']:.3f}")
+
+# Step 3: Get 3D world points to find actual cube position
+world_points = mask_to_world_points(mask.astype(np.uint8), depth, intrinsics, extrinsics)
+print(f"Number of world points: {len(world_points)}")
+
+if len(world_points) == 0:
+    print("ERROR: No valid world points!")
+else:
+    cube_center = np.mean(world_points, axis=0)
+    z_min = world_points[:, 2].min()
+    z_max = world_points[:, 2].max()
+    print(f"Cube center (world): {cube_center}")
+    print(f"Cube z range: [{z_min:.4f}, {z_max:.4f}], height: {z_max - z_min:.4f}")
+    
+    # Step 4: Plan grasp for orientation
+    seg_map = mask.astype(np.int32)
+    grasp_poses, grasp_scores = plan_grasp(depth, intrinsics, seg_map)
+    print(f"Found {len(grasp_poses)} grasp candidates")
+    
+    # Step 5: Select top-down grasp for orientation
+    best_grasp_world, best_score = select_top_down_grasp(grasp_poses, grasp_scores, extrinsics)
+    
+    if best_grasp_world is not None:
+        grasp_quat = decompose_transform(best_grasp_world)[1]
+        print(f"Top-down grasp orientation (wxyz): {grasp_quat}")
+        
+        # Verify approach direction is pointing down
+        R = best_grasp_world[:3, :3]
+        approach_dir = R[:, 2]
+        print(f"Approach direction (world): {approach_dir}")
+        print(f"Dot with world -z: {-approach_dir[2]:.3f}")
+        
+        # If not pointing down, use pure top-down
+        if approach_dir[2] > -0.5:
+            print("WARNING: Not truly top-down, using 180-deg rotation around x")
+            grasp_quat = np.array([0.0, 1.0, 0.0, 0.0])
+    else:
+        print("No top-down grasp from planner, using 180-deg rotation around x")
+        grasp_quat = np.array([0.0, 1.0, 0.0, 0.0])
+    
+    # Step 6: Set grasp position at the TOP of the cube (where fingers should be)
+    # Use cube center x,y and top z for the grasp target
+    grasp_pos = np.array([cube_center[0], cube_center[1], z_max])
+    print(f"Grasp position (world): {grasp_pos}")
+    
+    # Step 7: Define approach and lift positions (along world z for top-down)
+    approach_pos = grasp_pos.copy()
+    approach_pos[2] += 0.10  # 10 cm above
+    lift_pos = grasp_pos.copy()
+    lift_pos[2] += 0.15      # 15 cm above
+    
+    print(f"Approach position: {approach_pos}")
+    print(f"Lift position: {lift_pos}")
+    
+    # Step 8: Open gripper
+    open_gripper()
+    print("Gripper opened")
+    
+    # Step 9: Move to approach position
+    approach_joints = solve_ik(approach_pos, grasp_quat)
+    print(f"Approach joints: {approach_joints}")
+    move_to_joints(approach_joints)
+    print("Moved to approach position")
+    
+    # Step 10: Lower to grasp position
+    grasp_joints = solve_ik(grasp_pos, grasp_quat)
+    print(f"Grasp joints: {grasp_joints}")
+    move_to_joints(grasp_joints)
+    print("Moved to grasp position")
+    
+    # Step 11: Close gripper
+    close_gripper()
+    print("Gripper closed - grasping cube")
+    
+    # Step 12: Lift the cube
+    lift_joints = solve_ik(lift_pos, grasp_quat)
+    print(f"Lift joints: {lift_joints}")
+    move_to_joints(lift_joints)
+    print("Cube lifted successfully!")
+
+# Code block 2
+import numpy as np
+
+# Step 1: Get fresh observation
+obs = get_observation()
+rgb = obs["robot0_robotview"]["images"]["rgb"]
+depth = obs["robot0_robotview"]["images"]["depth"]
+intrinsics = obs["robot0_robotview"]["intrinsics"]
+extrinsics = obs["robot0_robotview"]["pose_mat"]
+
+# Step 2: Segment the red cube
+masks = segment_sam3_text_prompt(rgb, "red cube")
+if len(masks) == 0:
+    print("ERROR: No segmentation found for 'red cube'!")
+else:
+    best_seg = max(masks, key=lambda d: d["score"])
+    mask = best_seg["mask"]
+    print(f"Best mask: {mask.sum()} pixels, score={best_seg['score']:.3f}")
+
+    # Step 3: Get 3D world points to find actual cube position
+    world_points = mask_to_world_points(mask.astype(np.uint8), depth, intrinsics, extrinsics)
+    print(f"Number of world points: {len(world_points)}")
+
+    if len(world_points) == 0:
+        print("ERROR: No valid world points!")
+    else:
+        cube_center = np.mean(world_points, axis=0)
+        z_min = world_points[:, 2].min()
+        z_max = world_points[:, 2].max()
+        print(f"Cube center (world): {cube_center}")
+        print(f"Cube z range: [{z_min:.4f}, {z_max:.4f}], height: {z_max - z_min:.4f}")
+
+        # Step 4: Use pure top-down orientation
+        # 180-degree rotation around x-axis makes gripper z-axis point straight down (world -z)
+        grasp_quat = np.array([0.0, 1.0, 0.0, 0.0])  # [w, x, y, z]
+        print(f"Using pure top-down orientation (wxyz): {grasp_quat}")
+
+        # Step 5: Set grasp position at cube center
+        # TCP (panda_hand) at cube center so gripper fingers straddle the cube
+        grasp_pos = np.array([cube_center[0], cube_center[1], cube_center[2]])
+        print(f"Grasp position (world): {grasp_pos}")
+
+        # Step 6: Define approach and lift positions (along world z for top-down)
+        approach_pos = grasp_pos.copy()
+        approach_pos[2] += 0.10  # 10 cm above cube center
+        lift_pos = grasp_pos.copy()
+        lift_pos[2] += 0.15      # 15 cm above cube center
+
+        print(f"Approach position: {approach_pos}")
+        print(f"Lift position: {lift_pos}")
+
+        # Step 7: Open gripper before approaching (safety)
+        open_gripper()
+        print("Gripper opened")
+
+        # Step 8: Move to approach position (above the cube)
+        approach_joints = solve_ik(approach_pos, grasp_quat)
+        print(f"Approach joints: {approach_joints}")
+        move_to_joints(approach_joints)
+        print("Moved to approach position")
+
+        # Step 9: Lower to grasp position (at cube center)
+        grasp_joints = solve_ik(grasp_pos, grasp_quat)
+        print(f"Grasp joints: {grasp_joints}")
+        move_to_joints(grasp_joints)
+        print("Moved to grasp position")
+
+        # Step 10: Close gripper to grasp the cube
+        close_gripper()
+        print("Gripper closed - grasping cube")
+
+        # Step 11: Lift the cube
+        lift_joints = solve_ik(lift_pos, grasp_quat)
+        print(f"Lift joints: {lift_joints}")
+        move_to_joints(lift_joints)
+        print("Cube lifted successfully!")
+
+        # Step 12: Verify with new observation
+        obs2 = get_observation()
+        rgb2 = obs2["robot0_robotview"]["images"]["rgb"]
+        depth2 = obs2["robot0_robotview"]["images"]["depth"]
+        intrinsics2 = obs2["robot0_robotview"]["intrinsics"]
+        extrinsics2 = obs2["robot0_robotview"]["pose_mat"]
+        masks2 = segment_sam3_text_prompt(rgb2, "red cube")
+        if len(masks2) > 0:
+            best_seg2 = max(masks2, key=lambda d: d["score"])
+            mask2 = best_seg2["mask"]
+            world_points2 = mask_to_world_points(mask2.astype(np.uint8), depth2, intrinsics2, extrinsics2)
+            if len(world_points2) > 0:
+                cube_center2 = np.mean(world_points2, axis=0)
+                print(f"Cube center after lift: {cube_center2}")
+                print(f"Cube lifted by: {cube_center2[2] - cube_center[2]:.4f} m")
+            else:
+                print("No valid world points after lift")
+        else:
+            print("Cube not visible in new observation (may be occluded or lifted high)")
+
+
+Environment response:
+  Sandbox failed: 0
+  Stdout: Best mask: 2293 pixels, score=0.910
+Number of world points: 2293
+Cube center (world): [ 0.56513057  0.0229814  -0.0889707 ]
+Cube z range: [-0.1213, -0.0788], height: 0.0425
+Using pure top-down orientation (wxyz): [0. 1. 0. 0.]
+Grasp position (world): [ 0.56513057  0.0229814  -0.0889707 ]
+Approach position: [0.56513057 0.0229814  0.0110293 ]
+Lift position: [0.56513057 0.0229814  0.0610293 ]
+Gripper opened
+Approach joints: [ 0.41759714  0.65395558 -0.33865127 -2.10002589  0.47248158  2.68145275
+  0.50097108]
+Moved to approach position
+Grasp joints: [-0.02641781  0.87462765  0.04977714 -1.99517632 -0.14106506  2.86659622
+  0.92674804]
+Moved to grasp position
+Gripper closed - grasping cube
+Lift joints: [ 0.09632009  0.49112904 -0.05228103 -2.15265393  0.05152991  2.64265656
+  0.79035026]
+Cube lifted successfully!
+Cube center after lift: [0.57130308 0.02229723 0.04906411]
+Cube lifted by: 0.1380 m
+
+  Stderr: 
+  Reward: 1.0
+  Task Completed: True
+  Terminated: True, Truncated: False
+  Num Regenerations: 2
+  Num Finishes: 1
+  Num Code Blocks: 3
+----------------------------------------------------------------------------------------------------

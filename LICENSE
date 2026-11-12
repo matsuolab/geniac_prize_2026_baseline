@@ -1,0 +1,15 @@
+Copyright © Matsuo-Iwasawa Lab. All Rights Reserved.
+
+Permission is granted to participants and organizers of the GENIAC CaP competition to use, copy and modify
+this software, and to share it with other participants and organizers, solely for the purpose of taking part
+in or running the competition. Any other use, redistribution or publication, in whole or in part, requires
+prior written permission from the copyright holders.
+
+Third-party code and data included in this repository remain under their own licenses, listed in
+THIRD_PARTY_NOTICES.md and licenses/. This license does not restrict any right granted by those licenses.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.

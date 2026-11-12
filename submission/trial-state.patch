@@ -1,0 +1,34 @@
+diff --git a/capx/submission/code_env.py b/capx/submission/code_env.py
+index b32ebaa..eae28de 100644
+--- a/capx/submission/code_env.py
++++ b/capx/submission/code_env.py
+@@ -21,6 +21,11 @@ class GatewayCodeExecEnv(CodeExecutionEnvBase):
+     def __init__(self, cfg: CodeExecEnvConfig) -> None:
+         super().__init__(cfg)
+         self._prompt_template: list[dict[str, Any]] = copy.deepcopy(self._full_prompt)
++        # The APIs live as long as this env, across every trial of the task on this lane.
++        # Keep their attributes as they were built, so what one trial stored on an API
++        # (e.g. the rim side bowl_rim_grasp_for remembers) is gone before the next one
++        # starts (PRELIM_RULEBOOK.md §8.4).
++        self._api_state: dict[str, dict[str, Any]] = {n: dict(vars(a)) for n, a in self._apis.items()}
+ 
+     def reset(
+         self,
+@@ -28,12 +33,16 @@ class GatewayCodeExecEnv(CodeExecutionEnvBase):
+         seed: int | None = None,
+         options: dict[str, Any] | None = None,
+     ) -> tuple[ObsType, dict[str, Any]]:
+-        """Restore the prompt template, reset, and substitute the new instruction.
++        """Restore the APIs' attributes and the prompt template, reset, and substitute the new instruction.
+ 
+         ``_full_prompt`` is updated in place because ``obs["full_prompt"]`` is that
+         same list. ``str.replace``, not ``str.format``: the API docs in the prompt
+         contain literal braces.
+         """
++        for name, api in self._apis.items():
++            state = vars(api)
++            state.clear()
++            state.update(self._api_state[name])
+         self._full_prompt[:] = copy.deepcopy(self._prompt_template)
+         obs, info = super().reset(seed=seed, options=options)
+ 

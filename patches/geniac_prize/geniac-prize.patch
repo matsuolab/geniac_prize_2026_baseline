@@ -1,0 +1,222 @@
+diff --git a/capx/envs/runner.py b/capx/envs/runner.py
+index 234c97e..df01f8f 100644
+--- a/capx/envs/runner.py
++++ b/capx/envs/runner.py
+@@ -33,7 +33,7 @@ from capx.utils.parallel_eval import run_parallel_with_setup
+ # Constants
+ # ---------------------------------------------------------------------------
+ 
+-TRIAL_TIMEOUT_SECONDS = 1000
++TRIAL_TIMEOUT_SECONDS = int(os.environ.get("CAPX_TRIAL_TIMEOUT_S", "1000"))
+ MAX_TRIAL_RETRIES = 3
+ # Once a trial's deadline has passed it is raised again this often until the trial
+ # unwinds, so code that swallowed it once cannot keep the trial running.
+diff --git a/capx/envs/trial.py b/capx/envs/trial.py
+index d1d83bd..acedaca 100644
+--- a/capx/envs/trial.py
++++ b/capx/envs/trial.py
+@@ -642,6 +642,7 @@ def _handle_multi_turn_step(
+     turn_frames: list[np.ndarray] | None = None,
+     wrist_turn_frames: list[np.ndarray] | None = None,
+     wrist_base64_history: list[str] | None = None,
++    differencing_feedback_history: list[str] | None = None,
+ ) -> tuple[str, str | None, str | None, dict | None, list[dict], dict | None]:
+     """Execute one multi-turn decision step.
+ 
+@@ -700,6 +701,9 @@ def _handle_multi_turn_step(
+                 wrist_base64_history=wrist_base64_history,
+             )
+ 
++    if differencing_feedback is not None and differencing_feedback_history is not None:
++        differencing_feedback_history.append(differencing_feedback)
++
+     # Only pass visual feedback to prompt if visual_feedback is enabled
+     if not config["use_visual_feedback"]:
+         visual_feedback_base64 = None
+@@ -805,6 +809,7 @@ def _run_single_trial(
+     terminated = truncated = False
+     ensemble_data = None
+     multiturn_ensemble_data: list[dict[str, Any]] = []
++    differencing_feedback_history: list[str] = []
+ 
+     # Per-turn frame tracking (for video differencing and per-turn video saving)
+     turn_frame_ranges: list[tuple[int, int]] = []
+@@ -968,6 +973,7 @@ def _run_single_trial(
+                 turn_frames=turn_frames,
+                 wrist_turn_frames=wrist_turn_frames,
+                 wrist_base64_history=wrist_base64_history,
++                differencing_feedback_history=differencing_feedback_history,
+             )
+ 
+             if mt_ensemble is not None:
+@@ -1021,6 +1027,7 @@ def _run_single_trial(
+                 info_step.get("task_completed", False), final_code, raw_code,
+                 all_responses, ["-" * 100, "Generated program:", final_code],
+                 visual_feedback_imgs,
++                differencing_feedback_history=differencing_feedback_history,
+             )
+ 
+             # Only save intermediate video if NOT doing per-turn saving
+@@ -1072,6 +1079,7 @@ def _run_single_trial(
+         all_responses, log_lines, visual_feedback_imgs,
+         ensemble_data=ensemble_data,
+         multiturn_ensemble_data=multiturn_ensemble_data,
++        differencing_feedback_history=differencing_feedback_history,
+     )
+ 
+     # Save per-turn and combined videos
+diff --git a/capx/integrations/libero/__init__.py b/capx/integrations/libero/__init__.py
+index c322c2a..970c0d0 100644
+--- a/capx/integrations/libero/__init__.py
++++ b/capx/integrations/libero/__init__.py
+@@ -89,10 +89,20 @@ def load_libero_task(
+     vendor_root = os.path.normpath(os.path.join(here, "..", "..", "third_party", "LIBERO-PRO"))
+     if os.path.isdir(vendor_root) and vendor_root not in sys.path:
+         sys.path.append(vendor_root)
++    # CAPX_LIBERO_ROOT: an external LIBERO checkout (LIBERO-PRO or another suite) that takes precedence.
++    external_root = os.environ.get("CAPX_LIBERO_ROOT")
++    if external_root and external_root not in sys.path:
++        sys.path.insert(0, external_root)
+     try:
+-        from libero import benchmark  # type: ignore[import-not-found]
+-        from libero.envs import OffScreenRenderEnv  # type: ignore[import-not-found]
+-        from libero.utils import get_libero_path  # type: ignore[import-not-found]
++        try:
++            from libero import benchmark  # type: ignore[import-not-found]
++            from libero.envs import OffScreenRenderEnv  # type: ignore[import-not-found]
++            from libero.utils import get_libero_path  # type: ignore[import-not-found]
++        except ImportError:
++            # upstream LIBERO layout: the package is libero.libero
++            from libero.libero import benchmark  # type: ignore[import-not-found]
++            from libero.libero.envs import OffScreenRenderEnv  # type: ignore[import-not-found]
++            from libero.libero.utils import get_libero_path  # type: ignore[import-not-found]
+     except Exception as e:  # pragma: no cover - optional dependency
+         raise ModuleNotFoundError(
+             "LIBERO not available; add submodule or run `uv sync --extra libero`."
+diff --git a/capx/integrations/motion/curobo.py b/capx/integrations/motion/curobo.py
+index 4326ca6..d059a95 100644
+--- a/capx/integrations/motion/curobo.py
++++ b/capx/integrations/motion/curobo.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import os
+ from collections.abc import Callable
+ from typing import Any
+ 
+@@ -7,7 +8,7 @@ import numpy as np
+ 
+ from capx.utils.serve_utils import post_with_retries
+ 
+-DEFAULT_URL = "http://127.0.0.1:8117"
++DEFAULT_URL = os.environ.get("CUROBO_SERVICE_URL", "http://127.0.0.1:8117")
+ 
+ 
+ def init_curobo(
+diff --git a/capx/integrations/motion/pyroki.py b/capx/integrations/motion/pyroki.py
+index 28e6722..d27a548 100644
+--- a/capx/integrations/motion/pyroki.py
++++ b/capx/integrations/motion/pyroki.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ 
++import os
++
+ from collections.abc import Callable
+ from typing import Any
+ 
+@@ -9,7 +11,7 @@ from scipy.spatial.transform import Rotation as SciRotation
+ 
+ from capx.utils.serve_utils import post_with_retries
+ 
+-DEFAULT_URL = "http://127.0.0.1:8116"
++DEFAULT_URL = os.environ.get("PYROKI_SERVICE_URL", "http://127.0.0.1:8116")
+ 
+ 
+ def init_pyroki(
+diff --git a/capx/integrations/vision/owlvit.py b/capx/integrations/vision/owlvit.py
+index 6cfc12a..156b883 100644
+--- a/capx/integrations/vision/owlvit.py
++++ b/capx/integrations/vision/owlvit.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ 
++import os
++
+ import base64
+ import io
+ from typing import Any
+@@ -13,7 +15,7 @@ from capx.utils.serve_utils import post_with_retries
+ """OWL-ViT integration via FastAPI service."""
+ 
+ # Configuration
+-SERVICE_URL = "http://127.0.0.1:8117"
++SERVICE_URL = os.environ.get("OWLVIT_SERVICE_URL", "http://127.0.0.1:8117")
+ 
+ 
+ def _encode_image(image: np.ndarray | Image.Image) -> str:
+diff --git a/capx/integrations/vision/sam2.py b/capx/integrations/vision/sam2.py
+index a0bff31..3148a76 100644
+--- a/capx/integrations/vision/sam2.py
++++ b/capx/integrations/vision/sam2.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ 
++import os
++
+ import base64
+ import io
+ from collections.abc import Sequence
+@@ -14,7 +16,7 @@ from capx.utils.serve_utils import post_with_retries
+ """SAM 2 integration via FastAPI service."""
+ 
+ # Configuration
+-SERVICE_URL = "http://127.0.0.1:8113"
++SERVICE_URL = os.environ.get("SAM2_SERVICE_URL", "http://127.0.0.1:8113")
+ 
+ 
+ def _encode_image(image: np.ndarray | Image.Image) -> str:
+diff --git a/capx/integrations/vision/sam3.py b/capx/integrations/vision/sam3.py
+index 774f60d..6d9f858 100644
+--- a/capx/integrations/vision/sam3.py
++++ b/capx/integrations/vision/sam3.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ 
++import os
++
+ import base64
+ import io
+ import pathlib
+@@ -17,7 +19,7 @@ from capx.utils.serve_utils import post_with_retries
+ """SAM 3 integration via FastAPI service."""
+ 
+ # Configuration
+-SERVICE_URL = "http://127.0.0.1:8114"
++SERVICE_URL = os.environ.get("SAM3_SERVICE_URL", "http://127.0.0.1:8114")
+ 
+ 
+ def _encode_image(image: np.ndarray | Image.Image) -> str:
+diff --git a/capx/utils/launch_utils.py b/capx/utils/launch_utils.py
+index 43dc466..3a3cce3 100644
+--- a/capx/utils/launch_utils.py
++++ b/capx/utils/launch_utils.py
+@@ -286,6 +286,7 @@ def _save_trial_artifacts(
+     visual_feedback_imgs: list[Image.Image],
+     ensemble_data: dict[str, str] | None = None,
+     multiturn_ensemble_data: list[dict[str, str]] | None = None,
++    differencing_feedback_history: list[str] | None = None,
+ ) -> str | None:
+     """Save trial artifacts (code, logs, images) to the output directory.
+ 
+@@ -360,6 +361,10 @@ def _save_trial_artifacts(
+     for i, img in enumerate(visual_feedback_imgs):
+         img.save(trial_dir / f"visual_feedback_{i:02d}.png")
+ 
++    if differencing_feedback_history:
++        for i, text in enumerate(differencing_feedback_history):
++            (trial_dir / f"differencing_feedback_{i:02d}.txt").write_text(text)
++
+     return code_path
+ 
+ 

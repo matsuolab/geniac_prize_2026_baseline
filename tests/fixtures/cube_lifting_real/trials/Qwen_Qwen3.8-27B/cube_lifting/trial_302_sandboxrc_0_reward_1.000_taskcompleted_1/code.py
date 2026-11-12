@@ -1,0 +1,180 @@
+# Code block 0
+import numpy as np
+
+# Step 1: Get current observation
+obs = get_observation()
+rgb = obs["robot0_robotview"]["images"]["rgb"]
+depth = obs["robot0_robotview"]["images"]["depth"]
+intrinsics = obs["robot0_robotview"]["intrinsics"]
+extrinsics = obs["robot0_robotview"]["pose_mat"]
+
+print(f"Image shape: {rgb.shape}")
+print(f"Depth shape: {depth.shape}")
+
+# Step 2: Segment the red cube
+masks = segment_sam3_text_prompt(rgb, text_prompt="red cube")
+print(f"Found {len(masks)} segments")
+for i, m in enumerate(masks):
+    print(f"  Segment {i}: score={m['score']:.3f}, box={m.get('box', 'N/A')}")
+
+if len(masks) == 0:
+    print("ERROR: No segments found for 'red cube'")
+else:
+    # Step 3: Get the best segmentation
+    best_mask = max(masks, key=lambda d: d["score"])
+    mask = best_mask["mask"]
+    print(f"Best mask shape: {mask.shape}, pixels: {mask.sum()}")
+
+    if mask.sum() < 50:
+        print("WARNING: Mask has very few pixels, segmentation may be unreliable")
+
+    # Step 4: Plan grasp
+    grasp_poses, grasp_scores = plan_grasp(
+        depth=depth,
+        intrinsics=intrinsics,
+        segmentation=mask.astype(np.int32)
+    )
+    print(f"Found {len(grasp_poses)} grasp candidates")
+    if len(grasp_poses) > 0:
+        print(f"Scores range: {grasp_scores.min():.3f} to {grasp_scores.max():.3f}")
+
+    # Step 5: Select top-down grasp
+    best_grasp_world, best_score = select_top_down_grasp(
+        grasps=grasp_poses,
+        scores=grasp_scores,
+        cam_to_world=extrinsics
+    )
+
+    if best_grasp_world is None:
+        print("No top-down grasp found, using best score grasp instead")
+        best_idx = grasp_scores.argmax()
+        best_grasp_world = extrinsics @ grasp_poses[best_idx]
+        best_score = grasp_scores[best_idx]
+        print(f"Using grasp with score {best_score:.3f}")
+    else:
+        print(f"Selected top-down grasp with score {best_score:.3f}")
+
+    # Step 6: Decompose the grasp transform
+    grasp_pos, grasp_quat = decompose_transform(best_grasp_world)
+    print(f"Grasp position: {grasp_pos}")
+    print(f"Grasp quaternion (wxyz): {grasp_quat}")
+
+    # Step 7: Ensure gripper is open
+    open_gripper()
+    print("Gripper opened")
+
+    # Step 8: Move above the grasp point (approach)
+    approach_pos = grasp_pos.copy()
+    approach_pos[2] += 0.10  # 10cm above grasp point
+    print(f"Approach position: {approach_pos}")
+
+    joints_approach = solve_ik(approach_pos, grasp_quat)
+    print(f"Approach joints: {joints_approach}")
+    move_to_joints(joints_approach)
+    print("Moved to approach position")
+
+    # Step 9: Move down to grasp position
+    joints_grasp = solve_ik(grasp_pos, grasp_quat)
+    print(f"Grasp joints: {joints_grasp}")
+    move_to_joints(joints_grasp)
+    print("Moved to grasp position")
+
+    # Step 10: Close gripper to grasp the cube
+    close_gripper()
+    print("Gripper closed - grasping cube")
+
+    # Step 11: Lift the cube
+    lift_pos = grasp_pos.copy()
+    lift_pos[2] += 0.15  # Lift 15cm above grasp point
+    print(f"Lift position: {lift_pos}")
+    joints_lift = solve_ik(lift_pos, grasp_quat)
+    print(f"Lift joints: {joints_lift}")
+    move_to_joints(joints_lift)
+    print("Lifted the cube!")
+
+# Code block 1
+import numpy as np
+
+# Step 1: Get fresh observation
+obs = get_observation()
+rgb = obs["robot0_robotview"]["images"]["rgb"]
+depth = obs["robot0_robotview"]["images"]["depth"]
+intrinsics = obs["robot0_robotview"]["intrinsics"]
+extrinsics = obs["robot0_robotview"]["pose_mat"]
+
+# Step 2: Segment the red cube
+masks = segment_sam3_text_prompt(rgb, text_prompt="red cube")
+best_mask = max(masks, key=lambda d: d["score"])
+mask = best_mask["mask"]
+print(f"Best mask: score={best_mask['score']:.3f}, pixels={mask.sum()}")
+
+# Step 3: Get 3D world points from the mask
+world_points = mask_to_world_points(
+    mask=mask.astype(np.uint8),
+    depth=depth,
+    intrinsics=intrinsics,
+    extrinsics=extrinsics
+)
+print(f"World points: {world_points.shape}")
+print(f"X range: [{world_points[:,0].min():.4f}, {world_points[:,0].max():.4f}]")
+print(f"Y range: [{world_points[:,1].min():.4f}, {world_points[:,1].max():.4f}]")
+print(f"Z range: [{world_points[:,2].min():.4f}, {world_points[:,2].max():.4f}]")
+
+# Step 4: Compute cube center and top
+cube_center = world_points.mean(axis=0)
+top_z = world_points[:, 2].max()
+print(f"Cube center (world): {cube_center}")
+print(f"Cube top z: {top_z:.4f}")
+
+# Step 5: Define top-down grasp orientation
+# For Franka Panda, the panda_hand z-axis points in the gripper approach direction
+# For top-down grasp, we want the gripper to approach from above (z-axis pointing down)
+# In a z-up world frame, this requires 180-degree rotation around x-axis
+# Quaternion for 180 deg around x: [0, 1, 0, 0] in wxyz
+R_down = np.array([
+    [1, 0, 0],
+    [0, -1, 0],
+    [0, 0, -1]
+])
+top_down_quat = rotation_matrix_to_quaternion(R_down)
+print(f"Top-down quaternion (wxyz): {top_down_quat}")
+
+# Step 6: Define grasp position at the top of the cube
+# The gripper should be positioned so its fingers can close around the cube
+# Target the top surface of the cube
+grasp_pos = np.array([cube_center[0], cube_center[1], top_z])
+print(f"Grasp position: {grasp_pos}")
+
+# Step 7: Open gripper
+open_gripper()
+print("Gripper opened")
+
+# Step 8: Move to approach position (10cm above the top of the cube)
+approach_pos = grasp_pos.copy()
+approach_pos[2] += 0.10
+print(f"Approach position: {approach_pos}")
+
+joints_approach = solve_ik(approach_pos, top_down_quat)
+print(f"Approach joints: {joints_approach}")
+move_to_joints(joints_approach)
+print("Moved to approach position")
+
+# Step 9: Descend to grasp position (at the top of the cube)
+joints_grasp = solve_ik(grasp_pos, top_down_quat)
+print(f"Grasp joints: {joints_grasp}")
+move_to_joints(joints_grasp)
+print("Moved to grasp position")
+
+# Step 10: Close gripper to grasp the cube
+close_gripper()
+print("Gripper closed - grasping cube")
+
+# Step 11: Lift the cube (15cm above the grasp position)
+lift_pos = grasp_pos.copy()
+lift_pos[2] += 0.15
+print(f"Lift position: {lift_pos}")
+
+joints_lift = solve_ik(lift_pos, top_down_quat)
+print(f"Lift joints: {joints_lift}")
+move_to_joints(joints_lift)
+print("Lifted the cube!")

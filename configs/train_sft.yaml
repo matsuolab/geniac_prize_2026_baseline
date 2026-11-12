@@ -1,0 +1,41 @@
+# SFT warm-start config for `geniac-baseline train sft --config configs/train_sft.yaml` (examples/02_train_sft.sh).
+# Relative paths are resolved against this file's folder. No credentials belong here (the loader rejects
+# credential-like keys); wandb, when enabled, uses its own login. Settings: docs/train.md.
+
+# Output of `geniac-baseline convert split` (sft.jsonl, val.jsonl, manifest.json), or a Hugging Face dataset repo
+# given as hf://<owner>/<name>@<commit>[/<subdir>].
+data: ../runs/data/split
+# Local model snapshot directory or Hugging Face model id. Loaded with local_files_only (offline) by default.
+model: Qwen/Qwen3.8-27B
+output_dir: ../runs/train_sft
+
+train_file: sft.jsonl
+val_file: val.jsonl
+
+epochs: 3            # an adapter and a validation after every epoch (epoch-N/adapter); best_epoch.json at the end
+lr: 1.0e-4
+weight_decay: 0.0
+grad_accum: 8        # rows per optimizer step (batch size 1)
+grad_clip: 1.0
+warmup_steps: 3
+lora_rank: 32
+lora_alpha: 32
+lora_dropout: 0.0
+target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+max_steps: 0         # > 0 stops early (smoke tests)
+seed: 42
+save_every: 25       # ckpt-last every N steps
+val_every: 0         # extra validations every N steps (0 = only step 0 and every epoch end)
+val_max_rows: 0      # 0 = all val rows
+require_val: true    # val.jsonl must exist: the epoch is chosen by val/loss_all
+max_row_tokens: 100000  # longer rows are dropped and listed in the [data] line (0 = keep all)
+stop_after_min: 0    # > 0: checkpoint and exit after this many minutes (for jobs with a time limit)
+resume: null         # RUN/ckpt-last to resume from
+local_files_only: true
+
+wandb:
+  enabled: false     # off by default
+  project: null
+  name: null
+  mode: offline

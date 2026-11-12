@@ -1,0 +1,11 @@
+# task_map entries submission/install.sh adds to the image's env_configs/gateway/runner.yaml (an entry for the
+# same task_id is replaced). Other tasks resolve by embodiment and cameras to franka_libero.yaml,
+# franka_robosuite.yaml or franka_two_arm_lift.yaml, which install.sh also replaces.
+- task_id: nut_assembly
+  config: franka_nut_assembly.yaml
+- task_id: spill_wipe
+  config: franka_spill_wipe.yaml
+- task_id: two_arm_lift
+  config: franka_two_arm_lift.yaml
+- task_id: two_arm_handover
+  config: franka_two_arm_handover.yaml

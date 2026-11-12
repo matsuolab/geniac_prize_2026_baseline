@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 500" width="960" height="500" font-family="-apple-system, 'Segoe UI', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#59636e"/></marker></defs>
+<rect x="10" y="10" width="940" height="200" rx="14" fill="#f6f8fa" stroke="#d0d7de"/>
+<text x="28" y="36" text-anchor="start" font-size="13.5" font-weight="600" fill="#59636e">1 回の trial(1 task × 1 seed)</text>
+<rect x="40" y="80" width="230" height="76" rx="10" fill="#ddf4ff" stroke="#54aeff" stroke-width="1.5"/>
+<text x="155.0" y="112.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">Qwen3.8-27B</text>
+<text x="155.0" y="133.0" text-anchor="middle" font-size="12.5" fill="#59636e">+ LoRA adapter(学習するのはここ)</text>
+<rect x="480" y="80" width="250" height="76" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="605.0" y="112.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">CaP-X が code を実行</text>
+<text x="605.0" y="133.0" text-anchor="middle" font-size="12.5" fill="#59636e">LIBERO-PRO・Robosuite の simulator</text>
+<rect x="770" y="80" width="160" height="76" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="850.0" y="112.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">成功判定</text>
+<text x="850.0" y="133.0" text-anchor="middle" font-size="12.5" fill="#59636e">simulator の判定</text>
+<path d="M270,104 L478,104" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="374" y="96" text-anchor="middle" font-size="12.5" fill="#59636e">Python code</text>
+<path d="M480,134 L272,134" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="374" y="152" text-anchor="middle" font-size="12.5" fill="#59636e">stdout・stderr・観測の説明</text>
+<path d="M155,80 C155,50 850,50 850,78" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="500" y="48" text-anchor="middle" font-size="12.5" fill="#59636e">FINISH(終える)</text>
+<text x="125" y="186" text-anchor="start" font-size="12.5" fill="#59636e">直す時は REGENERATE + 新しい code</text>
+<rect x="10" y="240" width="940" height="250" rx="14" fill="#f6f8fa" stroke="#d0d7de"/>
+<text x="28" y="266" text-anchor="start" font-size="13.5" font-weight="600" fill="#59636e">ベースラインの流れ(番号は examples/ の script)</text>
+<rect x="30" y="300" width="140" height="70" rx="10" fill="#fbefff" stroke="#c297ff" stroke-width="1.5"/>
+<text x="100.0" y="329.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">0. 収集</text>
+<text x="100.0" y="350.0" text-anchor="middle" font-size="12.5" fill="#59636e">trial を保存</text>
+<rect x="215" y="300" width="140" height="70" rx="10" fill="#fff8c5" stroke="#d4a72c" stroke-width="1.5"/>
+<text x="285.0" y="329.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">2. SFT</text>
+<text x="285.0" y="350.0" text-anchor="middle" font-size="12.5" fill="#59636e">成功した trial</text>
+<rect x="400" y="300" width="140" height="70" rx="10" fill="#fff8c5" stroke="#d4a72c" stroke-width="1.5"/>
+<text x="470.0" y="329.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">4. DMPO</text>
+<text x="470.0" y="350.0" text-anchor="middle" font-size="12.5" fill="#59636e">SFT の adapter から</text>
+<rect x="585" y="300" width="140" height="70" rx="10" fill="#dafbe1" stroke="#4ac26b" stroke-width="1.5"/>
+<text x="655.0" y="329.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">1・5. 評価</text>
+<text x="655.0" y="350.0" text-anchor="middle" font-size="12.5" fill="#59636e">学習の前後、同じ seed</text>
+<rect x="770" y="300" width="150" height="70" rx="10" fill="#dafbe1" stroke="#4ac26b" stroke-width="1.5"/>
+<text x="845.0" y="329.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">提出</text>
+<text x="845.0" y="350.0" text-anchor="middle" font-size="12.5" fill="#59636e">Hugging Face に上げる</text>
+<rect x="307" y="400" width="140" height="62" rx="10" fill="#fbefff" stroke="#c297ff" stroke-width="1.5"/>
+<text x="377.0" y="425.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">3. pair</text>
+<text x="377.0" y="446.0" text-anchor="middle" font-size="12.5" fill="#59636e">成功と失敗の trial</text>
+<path d="M100.0,210 L100.0,298" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M170,335.0 L213,335.0" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M355,335.0 L398,335.0" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M540,335.0 L583,335.0" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M725,335.0 L768,335.0" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M100.0,370 L100.0,431 L305,431" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M447,431 L470.0,431 L470.0,372" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="845" y="398" text-anchor="middle" font-size="12.5" fill="#59636e">評価は運営チームが行う</text>
+</svg>

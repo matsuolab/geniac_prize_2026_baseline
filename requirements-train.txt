@@ -1,0 +1,9 @@
+# Training stack the baseline adapters were trained with (Python 3.12, CUDA 13.0, one B300).
+#   uv pip install -e ".[train]" -r requirements-train.txt --extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.9.1
+torchvision==0.24.1
+transformers @ git+https://github.com/huggingface/transformers@42f189ded85d18d00b51161d694cafd325e32b91
+peft==0.19.1
+accelerate==1.4.0
+tokenizers==0.22.2
+pillow==12.2.0

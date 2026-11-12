@@ -1,0 +1,5 @@
+{"pair_id": 0, "task": "cube_lifting", "match": "task", "split": "train", "chosen": "cube_lifting__fixture__trial302", "rejected": "cube_lifting__fixture__trial360", "chosen_turns": 3, "rejected_turns": 4}
+{"pair_id": 1, "task": "cube_lifting", "match": "task", "split": "train", "chosen": "cube_lifting__fixture__trial307", "rejected": "cube_lifting__fixture__trial352", "chosen_turns": 4, "rejected_turns": 3}
+{"pair_id": 2, "task": "cube_lifting", "match": "task", "split": "val", "chosen": "cube_lifting__fixture__trial392", "rejected": "cube_lifting__fixture__trial395", "chosen_turns": 3, "rejected_turns": 3}
+{"pair_id": 3, "task": "libero_fixture", "match": "layout", "split": "train", "chosen": "libero_fixture__fixture__trial302", "rejected": "libero_fixture__fixture__trial352", "chosen_turns": 3, "rejected_turns": 3}
+{"pair_id": 4, "task": "libero_fixture", "match": "task", "split": "train", "chosen": "libero_fixture__fixture__trial307", "rejected": "libero_fixture__fixture__trial360", "chosen_turns": 4, "rejected_turns": 4}

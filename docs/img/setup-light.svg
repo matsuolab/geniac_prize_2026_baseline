@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 500" width="960" height="500" font-family="-apple-system, 'Segoe UI', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#59636e"/></marker></defs>
+<rect x="10" y="10" width="640" height="480" rx="14" fill="#f6f8fa" stroke="#d0d7de"/>
+<text x="28" y="36" text-anchor="start" font-size="13.5" font-weight="600" fill="#59636e">geniac_prize_2026_baseline/(このリポジトリ)</text>
+<rect x="30" y="50" width="190" height="76" rx="10" fill="#fff8c5" stroke="#d4a72c" stroke-width="1.5"/>
+<text x="125.0" y="82.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">geniac_baseline</text>
+<text x="125.0" y="103.0" text-anchor="middle" font-size="12.5" fill="#59636e">変換・学習・計画・採点</text>
+<rect x="240" y="50" width="180" height="76" rx="10" fill="#fbefff" stroke="#c297ff" stroke-width="1.5"/>
+<text x="330.0" y="82.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">configs/</text>
+<text x="330.0" y="103.0" text-anchor="middle" font-size="12.5" fill="#59636e">run spec と task config</text>
+<rect x="440" y="50" width="190" height="76" rx="10" fill="#dafbe1" stroke="#4ac26b" stroke-width="1.5"/>
+<text x="535.0" y="82.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">patches/</text>
+<text x="535.0" y="103.0" text-anchor="middle" font-size="12.5" fill="#59636e">setup.sh と patch(2 つ)</text>
+<rect x="30" y="170" width="600" height="300" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+<text x="48" y="196" text-anchor="start" font-size="13.5" font-weight="600" fill="#59636e">geniac_prize_2026_code/(setup.sh が作る)</text>
+<rect x="50" y="216" width="260" height="76" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="180.0" y="248.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">capx/(コンペの CaP-X)</text>
+<text x="180.0" y="269.0" text-anchor="middle" font-size="12.5" fill="#59636e">決まった commit + patch</text>
+<rect x="340" y="216" width="270" height="76" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="475.0" y="248.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">capx/third_party/</text>
+<text x="475.0" y="269.0" text-anchor="middle" font-size="12.5" fill="#59636e">submodule 7 つ(LIBERO-PRO ほか)</text>
+<rect x="50" y="316" width="560" height="76" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="330.0" y="348.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">venv</text>
+<text x="330.0" y="369.0" text-anchor="middle" font-size="12.5" fill="#59636e">.venv(Robosuite)・.venv-libero(LIBERO-PRO)・.venv-serve(vLLM)</text>
+<text x="330" y="430" text-anchor="middle" font-size="12.5" fill="#59636e">収集と評価: このパッケージが書いた run.sh が、この venv で capx/envs/launch.py を呼ぶ</text>
+<text x="330" y="456" text-anchor="middle" font-size="12.5" fill="#59636e">シミュレータ、multi-turn の trial loop、skill library はすべてこちらにある</text>
+<path d="M125,126 L125,168" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="135" y="152" text-anchor="start" font-size="12.5" fill="#59636e">run.sh が呼ぶ</text>
+<path d="M535,126 L535,168" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="525" y="152" text-anchor="end" font-size="12.5" fill="#59636e">clone・patch・submodule</text>
+<rect x="680" y="50" width="260" height="76" rx="10" fill="#ddf4ff" stroke="#54aeff" stroke-width="1.5"/>
+<text x="810.0" y="82.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">GitHub</text>
+<text x="810.0" y="103.0" text-anchor="middle" font-size="12.5" fill="#59636e">matsuolab/geniac_prize_2026_code</text>
+<path d="M810,126 L810,196 L632,196" fill="none" stroke="#59636e" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="820" y="166" text-anchor="start" font-size="12.5" fill="#59636e">決まった commit を取る</text>
+<rect x="670" y="310" width="280" height="180" rx="14" fill="#f6f8fa" stroke="#d0d7de" stroke-dasharray="6 5"/>
+<text x="688" y="336" text-anchor="start" font-size="13.5" font-weight="600" fill="#59636e">ベースラインの数字の再現だけ</text>
+<rect x="690" y="352" width="240" height="76" rx="10" fill="#fbefff" stroke="#c297ff" stroke-width="1.5"/>
+<text x="810.0" y="384.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">ASPIRE</text>
+<text x="810.0" y="405.0" text-anchor="middle" font-size="12.5" fill="#59636e">patches/aspire/setup.sh</text>
+<text x="810" y="452" text-anchor="middle" font-size="12.5" fill="#59636e">venv はコンペの CaP-X の物を使う</text>
+<text x="810" y="474" text-anchor="middle" font-size="12.5" fill="#59636e">docs/reproduce_baseline.md</text>
+</svg>

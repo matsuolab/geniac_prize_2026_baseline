@@ -1,0 +1,168 @@
+----------------------------------------------------------------------------------------------------
+Generated program:
+# Code block 0
+import numpy as np
+
+# Step 1: Get the current observation
+obs = get_observation()
+cam = obs["robot0_robotview"]
+rgb = cam["images"]["rgb"]
+depth = cam["images"]["depth"]
+intrinsics = cam["intrinsics"]
+extrinsics = cam["pose_mat"]
+
+print(f"Image shape: {rgb.shape}")
+print(f"Depth shape: {depth.shape}")
+
+# Step 2: Segment the red cube using SAM3
+masks = segment_sam3_text_prompt(rgb, "red cube")
+print(f"Found {len(masks)} segments")
+for i, m in enumerate(masks):
+    print(f"  Segment {i}: score={m['score']:.3f}, box={m.get('box', 'N/A')}")
+
+if len(masks) == 0:
+    print("ERROR: No segments found for 'red cube'. Trying alternative prompt...")
+    masks = segment_sam3_text_prompt(rgb, "red block")
+    print(f"Found {len(masks)} segments with alternative prompt")
+
+if len(masks) == 0:
+    print("ERROR: Still no segments found. Cannot proceed.")
+else:
+    # Step 3: Get the best mask
+    best_mask = max(masks, key=lambda d: d["score"])
+    mask = best_mask["mask"]
+    print(f"Best mask shape: {mask.shape}, pixels: {mask.sum()}")
+
+    # Step 4: Plan grasp using Contact-GraspNet
+    # Cast to int32 as the API expects integer instance IDs
+    seg_input = mask.astype(np.int32)
+    grasp_poses, grasp_scores = plan_grasp(
+        depth=depth,
+        intrinsics=intrinsics,
+        segmentation=seg_input
+    )
+    print(f"Found {len(grasp_poses)} grasp candidates")
+    if len(grasp_poses) > 0:
+        print(f"Grasp scores range: [{grasp_scores.min():.3f}, {grasp_scores.max():.3f}]")
+
+    if len(grasp_poses) == 0:
+        print("ERROR: No grasp candidates found. Cannot proceed.")
+    else:
+        # Step 5: Select the best top-down grasp
+        best_grasp_world, best_score = select_top_down_grasp(
+            grasps=grasp_poses,
+            scores=grasp_scores,
+            cam_to_world=extrinsics,
+            vertical_threshold=0.8
+        )
+
+        if best_grasp_world is None:
+            print("No top-down grasp found, using best score grasp instead")
+            best_idx = grasp_scores.argmax()
+            best_grasp_world = extrinsics @ grasp_poses[best_idx]
+            best_score = grasp_scores[best_idx]
+            print(f"Using best score grasp: {best_score:.3f}")
+        else:
+            print(f"Selected top-down grasp with score: {best_score:.3f}")
+
+        # Step 6: Decompose the grasp transform
+        grasp_pos, grasp_quat = decompose_transform(best_grasp_world)
+        print(f"Grasp position (world): {grasp_pos}")
+        print(f"Grasp quaternion (wxyz): {grasp_quat}")
+
+        # Step 7: Create a pre-grasp position (above the object) to avoid collisions
+        # Move 8cm above the grasp position in world Z
+        pre_grasp_pos = grasp_pos.copy()
+        pre_grasp_pos[2] += 0.08
+        print(f"Pre-grasp position (world): {pre_grasp_pos}")
+
+        # Step 8: Solve IK for pre-grasp and move there first
+        pre_grasp_joints = solve_ik(pre_grasp_pos, grasp_quat)
+        print(f"Pre-grasp joint angles: {pre_grasp_joints}")
+        move_to_joints(pre_grasp_joints)
+        print("Robot moved to pre-grasp position (above object)")
+
+        # Step 9: Solve IK for the actual grasp position and move down
+        grasp_joints = solve_ik(grasp_pos, grasp_quat)
+        print(f"Grasp joint angles: {grasp_joints}")
+        move_to_joints(grasp_joints)
+        print("Robot moved to grasp position")
+
+        # Step 10: Close the gripper
+        close_gripper()
+        print("Gripper closed")
+
+        # Step 11: Lift the cube (move up by 10cm in world Z)
+        lift_pos = grasp_pos.copy()
+        lift_pos[2] += 0.10
+        print(f"Lift position (world): {lift_pos}")
+        lift_joints = solve_ik(lift_pos, grasp_quat)
+        print(f"Lift joint angles: {lift_joints}")
+        move_to_joints(lift_joints)
+        print("Cube lifted!")
+
+# Code block 1
+import numpy as np
+
+# The cube was grasped but not lifted high enough.
+# Previous grasp position: [0.56270893, 0.03827392, -0.09519589]
+# Previous lift position: [0.56270893, 0.03827392, 0.00480411] (only ~10cm above grasp)
+# Need to lift significantly higher to clearly complete the "lift" portion.
+
+# Use the same orientation as the successful grasp
+grasp_quat = np.array([-0.05794189, 0.20888472, 0.96682337, 0.13513875])
+
+# Lift to z=0.10 in world frame (about 20cm above the grasp point)
+lift_pos = np.array([0.56270893, 0.03827392, 0.10])
+print(f"New lift position (world): {lift_pos}")
+
+# Solve IK and move
+lift_joints = solve_ik(lift_pos, grasp_quat)
+print(f"Lift joint angles: {lift_joints}")
+move_to_joints(lift_joints)
+print("Robot lifted the cube higher!")
+
+# Verify by getting a new observation
+obs = get_observation()
+cam = obs["robot0_robotview"]
+rgb = cam["images"]["rgb"]
+depth = cam["images"]["depth"]
+intrinsics = cam["intrinsics"]
+extrinsics = cam["pose_mat"]
+
+# Check if the red cube is still visible and where it is
+masks = segment_sam3_text_prompt(rgb, "red cube")
+if len(masks) > 0:
+    best_mask = max(masks, key=lambda d: d["score"])
+    mask = best_mask["mask"]
+    print(f"Red cube found with score {best_mask['score']:.3f}, pixels: {mask.sum()}")
+    ys, xs = np.where(mask)
+    if len(xs) > 0:
+        cx, cy = xs.mean(), ys.mean()
+        z = depth[int(cy), int(cx)]
+        world_pt = pixel_to_world_point(int(cx), int(cy), z, intrinsics, extrinsics)
+        print(f"Cube world position: {world_pt}")
+        print(f"Cube Z: {world_pt[2]:.4f} (target was 0.10)")
+else:
+    print("Red cube not found in view - may be hidden by gripper or lifted out of frame")
+    print("Task likely complete.")
+
+
+Environment response:
+  Sandbox failed: 0
+  Stdout: New lift position (world): [0.56270893 0.03827392 0.1       ]
+Lift joint angles: [-0.01006096  0.42628497  0.0213331  -2.11017823  0.44022459  2.43221021
+ -2.27210021]
+Robot lifted the cube higher!
+Red cube found with score 0.338, pixels: 2294
+Cube world position: [0.56917313 0.03089301 0.09122995]
+Cube Z: 0.0912 (target was 0.10)
+
+  Stderr: 
+  Reward: 1.0
+  Task Completed: True
+  Terminated: True, Truncated: False
+  Num Regenerations: 1
+  Num Finishes: 1
+  Num Code Blocks: 2
+----------------------------------------------------------------------------------------------------

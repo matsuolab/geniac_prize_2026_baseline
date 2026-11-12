@@ -1,0 +1,33 @@
+# DMPO config for `geniac-baseline train dmpo --config configs/train_dmpo.yaml` (examples/04_train_dmpo.sh).
+# Relative paths are resolved against this file's folder. No credentials belong here. Settings and their
+# provenance: docs/train.md.
+
+# Output of `geniac-baseline pairs` (pairs.jsonl, rows.jsonl, manifest.json), or hf://<owner>/<name>@<commit>[/<subdir>].
+data: ../runs/data/pairs
+model: Qwen/Qwen3.8-27B
+# The SFT adapter: the policy starts from it, and the frozen reference is it. An SFT run directory resolves to the
+# epoch with the lowest val/loss_all (its best_epoch.json; the baseline: epoch 2). An adapter directory is used as is.
+init_adapter: ../runs/train_sft
+output_dir: ../runs/train_dmpo
+
+beta: 0.5            # DMPO beta
+gamma: 0.9           # DMPO discount
+lr: 1.0e-5
+weight_decay: 0.0
+epochs: 3
+pairs_per_step: 32   # the last step of an epoch takes the remaining pairs (can be 1)
+warmup_steps: 1
+grad_clip: 1.0
+
+max_steps: 0         # > 0 stops early (smoke tests)
+max_pairs: 0         # > 0 uses only the first N train pairs (smoke tests)
+seed: 42
+stop_after_min: 0    # > 0: checkpoint and exit when one more step would pass this many minutes since job start
+resume: null         # RUN/ckpt-last to resume from (ref_logp.json in output_dir is reused)
+local_files_only: true
+
+wandb:
+  enabled: false
+  project: null
+  name: null
+  mode: offline

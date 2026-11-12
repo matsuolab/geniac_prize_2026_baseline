@@ -1,0 +1,155 @@
+# Run spec for `geniac-baseline collect plan --spec configs/collect_libero.yaml` (examples/00_collect_data.sh): LIBERO-PRO, 30 tasks, layouts 0-39.
+# Writes <output_dir>/run.sh (run it on a GPU node), one config copy per seed segment, and sources.yaml for
+# `geniac-baseline convert rows`. Relative paths are resolved against this file's folder. Settings: docs/collect.md.
+#
+# Tree: the competition CaP-X + patch (bash patches/geniac_prize/setup.sh, docs/installation.md). To reproduce the
+# baseline numbers use the ASPIRE tree instead (docs/reproduce_baseline.md): capx_root: <ASPIRE root>,
+# launch_script: aspire/sim/cap/envs/launch.py, pythonpath: <ASPIRE root>, and configs/capx/aspire/... as the
+# task configs.
+
+mode: collect
+capx_root: ../geniac_prize_2026_code   # bash patches/geniac_prize/setup.sh writes it here
+launch_script: capx/envs/launch.py      # relative to capx_root
+sim_python: .venv-libero/bin/python    # relative to capx_root (LIBERO-PRO has its own venv)
+serve_python: .venv-serve/bin/python    # an environment with vLLM
+pythonpath: null                        # extra PYTHONPATH for the launch (ASPIRE: its root)
+
+model: Qwen/Qwen3.8-27B   # served model name; weights: Qwen/Qwen3.8-27B revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+model_path: null          # local weights directory; null = let vLLM resolve the model id
+molmo: true               # Molmo2-8B pointing server (nut_assembly's API uses it)
+molmo_path: null
+chat_template: ../runs/qwen38_low_reasoning.jinja   # geniac-baseline template --model-dir <snapshot> --out <this path>
+
+output_dir: ../runs/collect_libero
+port_offset: 0            # perception servers (*_SERVICE_URL); 0 = CaP-X default ports
+vllm_port_offset: 0
+b300_workarounds: false   # true on B300: attention-kernel flags + TORCH_CUDA_ARCH_LIST=10.0
+num_workers: null         # null = the config's num_workers (8)
+trial_timeout_s: 2400     # per trial wall clock (ASPIRE default the baseline ran with)
+# GPU: one GPU holds every server; shares below are the baseline's on a 275 GB B300 (docs/collect.md)
+max_model_len: 262144
+tensor_parallel_size: 1
+qwen_gpu_util: null       # null = 0.62 (collect, one server) / 0.30 per server (eval, two servers)
+molmo_gpu_util: 0.28
+
+tasks:
+  - task: libero_goal_bowl_on_cabinet
+    config: capx/geniac_prize/libero/libero_goal_bowl_on_cabinet.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_goal_bowl_on_plate
+    config: capx/geniac_prize/libero/libero_goal_bowl_on_plate.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_goal_bowl_on_stove
+    config: capx/geniac_prize/libero/libero_goal_bowl_on_stove.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_goal_cream_cheese_bowl
+    config: capx/geniac_prize/libero/libero_goal_cream_cheese_bowl.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_goal_drawer
+    config: capx/geniac_prize/libero/libero_goal_drawer.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_goal_drawer_bowl
+    config: capx/geniac_prize/libero/libero_goal_drawer_bowl.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_goal_push_plate
+    config: capx/geniac_prize/libero/libero_goal_push_plate.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_goal_turn_on_stove
+    config: capx/geniac_prize/libero/libero_goal_turn_on_stove.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_goal_wine_on_cabinet
+    config: capx/geniac_prize/libero/libero_goal_wine_on_cabinet.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_goal_wine_on_rack
+    config: capx/geniac_prize/libero/libero_goal_wine_on_rack.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_object_alphabet_soup
+    config: capx/geniac_prize/libero/libero_object_alphabet_soup.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_object_bbq_sauce
+    config: capx/geniac_prize/libero/libero_object_bbq_sauce.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_object_butter
+    config: capx/geniac_prize/libero/libero_object_butter.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_object_chocolate_pudding
+    config: capx/geniac_prize/libero/libero_object_chocolate_pudding.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_object_cream_cheese
+    config: capx/geniac_prize/libero/libero_object_cream_cheese.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_object_ketchup
+    config: capx/geniac_prize/libero/libero_object_ketchup.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_object_milk
+    config: capx/geniac_prize/libero/libero_object_milk.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_object_orange_juice
+    config: capx/geniac_prize/libero/libero_object_orange_juice.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_object_salad_dressing
+    config: capx/geniac_prize/libero/libero_object_salad_dressing.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_object_tomato_sauce
+    config: capx/geniac_prize/libero/libero_object_tomato_sauce.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_spatial_bowl_plate
+    config: capx/geniac_prize/libero/libero_spatial_bowl_plate.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_spatial_in_drawer
+    config: capx/geniac_prize/libero/libero_spatial_in_drawer.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_spatial_next_to_cookie_box
+    config: capx/geniac_prize/libero/libero_spatial_next_to_cookie_box.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_spatial_next_to_plate
+    config: capx/geniac_prize/libero/libero_spatial_next_to_plate.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_spatial_next_to_ramekin
+    config: capx/geniac_prize/libero/libero_spatial_next_to_ramekin.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_spatial_on_cabinet
+    config: capx/geniac_prize/libero/libero_spatial_on_cabinet.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_spatial_on_cookie_box
+    config: capx/geniac_prize/libero/libero_spatial_on_cookie_box.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_spatial_on_ramekin
+    config: capx/geniac_prize/libero/libero_spatial_on_ramekin.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_spatial_on_stove
+    config: capx/geniac_prize/libero/libero_spatial_on_stove.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]
+  - task: libero_spatial_table_center
+    config: capx/geniac_prize/libero/libero_spatial_table_center.yaml
+    layouts: 50
+    seeds: ["301-340", "351-390"]

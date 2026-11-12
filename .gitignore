@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+wandb/
+.DS_Store
+/runs/
+/data/
+.pytest_cache/
+.ruff_cache/
+/geniac_prize_2026_code
+uv.lock
+/ASPIRE

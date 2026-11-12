@@ -1,0 +1,1600 @@
+diff --git a/aspire/sim/cap/envs/runner.py b/aspire/sim/cap/envs/runner.py
+index 2288762..8311e21 100644
+--- a/aspire/sim/cap/envs/runner.py
++++ b/aspire/sim/cap/envs/runner.py
+@@ -46,7 +46,10 @@ from aspire.sim.cap.utils.parallel_eval import run_parallel_with_setup
+ # Constants
+ # ---------------------------------------------------------------------------
+ 
+-TRIAL_TIMEOUT_SECONDS = 1000
++# Qwen3.8 needs several multi-turn queries per trial and the B300 runs the
++# MuJoCo side on CPU, so 1000 s cut off 8 of 10 cube_restack trials before
++# they could finish. Overridable so the budget can be tuned per run.
++TRIAL_TIMEOUT_SECONDS = int(os.environ.get("ASPIRE_TRIAL_TIMEOUT_S", 2400))
+ MAX_TRIAL_RETRIES = 2
+ 
+ 
+diff --git a/b/aspire/sim/cap/envs/simulators/og_compat.py b/aspire/sim/cap/envs/simulators/og_compat.py
+new file mode 100644
+index 0000000..ffe6d2a
+--- /dev/null
++++ b/aspire/sim/cap/envs/simulators/og_compat.py
+@@ -0,0 +1,616 @@
++"""Compatibility shims between the OmniGibson release cap-x was written for and
++the one this cluster can actually run.
++
++cap-x's BEHAVIOR adapter targets the OmniGibson 3.7.2 fork bundled under
++`capx/third_party/b1k`, which only supports Isaac Sim 4.5 -- a release with no
++Blackwell support, so it cannot run on the B300 nodes here. The simulator has
++to be Isaac Sim 5.1, i.e. OmniGibson 3.9. Everything below prefers the upstream
++symbol and only steps in when 3.9 changed it.
++"""
++
++import inspect
++
++import torch as th
++
++
++# --------------------------------------------------------------------------
++# holonomic base commands
++#
++# Both releases convert a target joint configuration into a base command inside
++# `Robot.q_to_action`, but they read the base pose from different places:
++#
++#   3.7  `body_pose = self.get_position_orientation()`   -> the robot's WORLD
++#        pose, so the caller has to hand in world-frame base entries, which is
++#        what `holonomic_base_command_in_world_frame` produced.
++#   3.9  `body_pos/body_quat` come from `get_joint_positions()[base_idx]`, i.e.
++#        the base pose in the robot ROOT frame -- which is exactly what CuRobo
++#        already returns.
++#
++# So on 3.9 the conversion must NOT happen: applying it would transform the
++# command twice and steer the base to the wrong place. The call sites in the
++# adapter stay as they are and this shim becomes the identity.
++# --------------------------------------------------------------------------
++
++
++def _identity_base_command(robot, joint_pos):
++    """3.9: CuRobo's root-frame configuration is already what q_to_action wants."""
++    return joint_pos
++
++
++try:  # OmniGibson <= 3.7
++    from omnigibson.action_primitives.curobo import holonomic_base_command_in_world_frame
++except ImportError:  # OmniGibson >= 3.9
++    holonomic_base_command_in_world_frame = _identity_base_command
++
++
++def holonomic_base_pose_in_root_frame(robot):
++    """Present upstream on <= 3.7; ported here for 3.9."""
++    try:
++        from omnigibson.action_primitives.curobo import (
++            holonomic_base_pose_in_root_frame as _upstream,
++        )
++
++        return _upstream(robot)
++    except ImportError:
++        pass
++
++    import omnigibson.utils.transform_utils as T
++
++    base_pos, base_quat = robot.links[robot.base_footprint_link_name].get_position_orientation()
++    root_pos, root_quat = robot.root_link.get_position_orientation()
++    relative_pos, relative_quat = T.relative_pose_transform(base_pos, base_quat, root_pos, root_quat)
++    base_euler = T.mat2euler_intrinsic(T.quat2mat(relative_quat))
++    return th.cat((relative_pos, base_euler))
++
++
++def robot_model_name(robot, among=None):
++    """The robot's model name, as the challenge data spells it.
++
++    3.7 exposed `Robot.model_name` ("R1Pro"); 3.9 has `Robot.model`, which is
++    lower case ("r1pro"). The task instances key their presampled robot poses
++    the 3.7 way, so a plain `robot.model` misses ("KeyError: 'r1pro'"). Pass the
++    keys available and the spelling among them is returned.
++    """
++    name = getattr(robot, "model_name", None) or robot.model
++    if among is None:
++        return name
++    if name in among:
++        return name
++    folded = {str(k).lower(): k for k in among}
++    if name.lower() in folded:
++        return folded[name.lower()]
++    raise KeyError(f"robot {name!r} is not among {sorted(among)}")
++
++
++# --------------------------------------------------------------------------
++# action primitives
++#
++# cap-x's fork added a handful of planner knobs to StarterSemanticActionPrimitives
++# (`ik_only`, `ik_world_collision_check`, `attached_obj`, `attached_obj_scale`,
++# `ignore_all_obstacles`) plus `overwrite_arm`. The underlying
++# `CuRoboMotionGenerator.compute_trajectories` in 3.9 still takes every one of
++# them, so the port is plumbing, not new behaviour.
++# --------------------------------------------------------------------------
++
++
++def _stock_primitives_have_extras():
++    from omnigibson.action_primitives.starter_semantic_action_primitives import (
++        StarterSemanticActionPrimitives,
++    )
++
++    params = inspect.signature(StarterSemanticActionPrimitives._move_hand).parameters
++    return "ik_only" in params and hasattr(StarterSemanticActionPrimitives, "overwrite_arm")
++
++
++def make_action_primitives(env, robot, **kwargs):
++    """StarterSemanticActionPrimitives with the knobs cap-x's adapter passes."""
++    from omnigibson.action_primitives.starter_semantic_action_primitives import (
++        StarterSemanticActionPrimitives,
++    )
++
++    # Constructing these warms up cuRobo's motion generator, which is where the
++    # LBFGS kernel faults on Blackwell; see force_curobo_torch_lbfgs.
++    force_curobo_torch_lbfgs()
++
++    if _curobo_cuda_graphs_broken():
++        return _build_primitives_without_cuda_graphs(env, robot, **kwargs)
++
++    if _stock_primitives_have_extras():
++        return StarterSemanticActionPrimitives(env, robot, **kwargs)
++    return _PortedActionPrimitives(env, robot, **kwargs)
++
++
++def _remove_obstacles(motion_generator):
++    """Reduce the collision world to the floor plane (3.9 dropped this helper)."""
++    import omnigibson as og
++    import omnigibson.lazy as lazy
++    import omnigibson.utils.transform_utils as T
++    from omnigibson.action_primitives.curobo import CuRoboEmbodimentSelection
++
++    obstacles = {"cuboid": None, "sphere": None, "mesh": [], "cylinder": None, "capsule": None}
++    robot_transform = T.pose_inv(T.pose2mat(motion_generator.robot.root_link.get_position_orientation()))
++
++    if og.sim.floor_plane is not None:
++        try:
++            prim = og.sim.floor_plane.prim.GetChildren()[0]
++            obstacles["mesh"].append(
++                lazy.curobo.util.usd_helper.get_mesh_attrs(
++                    prim, cache=motion_generator.usd_help._xform_cache, transform=robot_transform.numpy()
++                )
++            )
++        except Exception as e:  # noqa: BLE001 -- upstream swallows this too
++            print(f"Error adding floor plane to world collision checker: {e}")
++
++    world = lazy.curobo.geom.types.WorldConfig(**obstacles).get_collision_check_world()
++    motion_generator.mg[CuRoboEmbodimentSelection.DEFAULT].update_world(world)
++
++
++def _build_ported_primitives():
++    import math
++
++    import omnigibson.action_primitives.starter_semantic_action_primitives as _ssap
++    from omnigibson.action_primitives.action_primitive_set_base import ActionPrimitiveError
++    from omnigibson.action_primitives.curobo import CuRoboEmbodimentSelection
++    from omnigibson.action_primitives.starter_semantic_action_primitives import (
++        StarterSemanticActionPrimitives,
++        indented_print,
++    )
++
++    class _Ported(StarterSemanticActionPrimitives):
++        # `arm` is a read-only property in 3.9, so the fork's `self.arm = ...`
++        # needs an instance-level override instead.
++        _arm_override = None
++
++        @property
++        def arm(self):
++            if self._arm_override is not None:
++                return self._arm_override
++            return self.robot.default_arm
++
++        def overwrite_arm(self, arm):
++            self._arm_override = self.robot.arm_names[arm]
++
++        def _plan_joint_motion(
++            self,
++            target_pos,
++            target_quat,
++            embodiment_selection=CuRoboEmbodimentSelection.DEFAULT,
++            motion_constraint=None,
++            skip_obstacle_update=False,
++            ignore_objects=None,
++            attached_obj=None,
++            attached_obj_scale=None,
++            ik_only=False,
++            ik_world_collision_check=True,
++            ignore_all_obstacles=False,
++        ):
++            # 3.9's body, with the fork's extra knobs threaded through.
++            obj_in_hand = self._get_obj_in_hand()
++            # An object whose root link carries no trimesh cannot be attached to
++            # the plan; the caller's @attached_obj is used instead.
++            attachable = obj_in_hand is not None
++            if attachable:
++                try:
++                    obj_in_hand.root_link.get_trimesh_mesh()
++                except Exception:  # noqa: BLE001
++                    attachable = False
++            if attachable:
++                attached_obj = {self.robot.eef_link_names[self.arm]: obj_in_hand.root_link}
++
++            batch = self._motion_generator.batch_size
++            target_pos = {k: th.stack([v for _ in range(batch)]) for k, v in target_pos.items()}
++            target_quat = {k: th.stack([v for _ in range(batch)]) for k, v in target_quat.items()}
++
++            if not skip_obstacle_update:
++                self._motion_generator.update_obstacles(ignore_objects=ignore_objects)
++            if ignore_all_obstacles:
++                _remove_obstacles(self._motion_generator)
++
++            successes, traj_paths = self._motion_generator.compute_trajectories(
++                target_pos=target_pos,
++                target_quat=target_quat,
++                initial_joint_pos=None,
++                is_local=False,
++                max_attempts=math.ceil(_ssap.m.MAX_PLANNING_ATTEMPTS / batch),
++                timeout=60.0,
++                ik_fail_return=_ssap.m.MAX_IK_FAILURES_BEFORE_RETURN,
++                enable_finetune_trajopt=True,
++                finetune_attempts=1,
++                return_full_result=False,
++                success_ratio=1.0 / batch,
++                attached_obj=attached_obj,
++                attached_obj_scale=attached_obj_scale,
++                motion_constraint=motion_constraint,
++                skip_obstacle_update=True,
++                ik_only=ik_only,
++                ik_world_collision_check=ik_world_collision_check,
++                emb_sel=embodiment_selection,
++            )
++
++            success_idx = th.where(successes)[0].cpu()
++            if len(success_idx) == 0:
++                raise ActionPrimitiveError(
++                    ActionPrimitiveError.Reason.PLANNING_ERROR,
++                    "There is no accessible path from where you are to the desired pose. Try again",
++                )
++
++            traj_path = traj_paths[success_idx[0]]
++            q_traj = (
++                self._motion_generator.path_to_joint_trajectory(
++                    traj_path, get_full_js=True, emb_sel=embodiment_selection
++                )
++                .cpu()
++                .float()
++            )
++            return self._motion_generator.add_linearly_interpolated_waypoints(traj=q_traj, max_inter_dist=0.01)
++
++        def _move_hand(
++            self,
++            target_pose,
++            stop_on_contact=False,
++            stop_on_ag=False,
++            motion_constraint=None,
++            low_precision=False,
++            lock_auxiliary_arm=False,
++            ignore_objects=None,
++            attached_obj=None,
++            attached_obj_scale=None,
++            ik_only=False,
++            ik_world_collision_check=True,
++            ignore_all_obstacles=False,
++            skip_obstacle_update=False,
++        ):
++            if self.debug_visual_marker is not None:
++                self.debug_visual_marker.set_position_orientation(*target_pose)
++
++            yield from self._settle_robot()
++            if not lock_auxiliary_arm:
++                target_pos = {self.robot.eef_link_names[self.arm]: target_pose[0]}
++                target_quat = {self.robot.eef_link_names[self.arm]: target_pose[1]}
++            else:
++                left_pos, left_quat = (
++                    target_pose if self.arm == "left" else self.robot.get_eef_pose(arm="left")
++                )
++                right_pos, right_quat = (
++                    target_pose if self.arm == "right" else self.robot.get_eef_pose(arm="right")
++                )
++                target_pos = {
++                    self.robot.eef_link_names["left"]: left_pos,
++                    self.robot.eef_link_names["right"]: right_pos,
++                }
++                target_quat = {
++                    self.robot.eef_link_names["left"]: left_quat,
++                    self.robot.eef_link_names["right"]: right_quat,
++                }
++
++            q_traj = self._plan_joint_motion(
++                target_pos=target_pos,
++                target_quat=target_quat,
++                embodiment_selection=CuRoboEmbodimentSelection.ARM,
++                motion_constraint=motion_constraint,
++                ignore_objects=ignore_objects,
++                attached_obj=attached_obj,
++                attached_obj_scale=attached_obj_scale,
++                ik_only=ik_only,
++                ik_world_collision_check=ik_world_collision_check,
++                ignore_all_obstacles=ignore_all_obstacles,
++                skip_obstacle_update=skip_obstacle_update,
++            )
++            indented_print(f"Plan has {len(q_traj)} steps")
++            yield from self._execute_motion_plan(
++                q_traj, stop_on_contact=stop_on_contact, stop_on_ag=stop_on_ag, low_precision=low_precision
++            )
++
++        def _navigate_to_pose(self, pose_2d, skip_obstacle_update=False, ignore_all_obstacles=False):
++            pose_3d = self._get_robot_pose_from_2d_pose(pose_2d)
++            if self.debug_visual_marker is not None:
++                self.debug_visual_marker.set_position_orientation(*pose_3d)
++            target_pos = {self.robot.base_footprint_link_name: pose_3d[0]}
++            target_quat = {self.robot.base_footprint_link_name: pose_3d[1]}
++            q_traj = self._plan_joint_motion(
++                target_pos,
++                target_quat,
++                embodiment_selection=CuRoboEmbodimentSelection.BASE,
++                skip_obstacle_update=skip_obstacle_update,
++                ignore_all_obstacles=ignore_all_obstacles,
++            )
++            yield from self._execute_motion_plan(q_traj)
++
++    return _Ported
++
++
++class _LazyPorted:
++    """Builds the subclass on first use: importing OmniGibson at module import
++    time would drag the simulator into processes that only need the shims."""
++
++    _cls = None
++
++    def __call__(self, *args, **kwargs):
++        if _LazyPorted._cls is None:
++            _LazyPorted._cls = _build_ported_primitives()
++        return _LazyPorted._cls(*args, **kwargs)
++
++
++_PortedActionPrimitives = _LazyPorted()
++
++
++# --------------------------------------------------------------------------
++# challenge data generation
++#
++# cap-x's adapter was written against the 2025 BEHAVIOR challenge: it reads
++# `2025-challenge-task-instances` and aggregates per-episode human stats itself.
++# OmniGibson 3.9 is the 2026 codebase -- `get_task_instance_path` only looks
++# under `2026-challenge-task-instances`, task ids come from `B100_task_misc.csv`,
++# and the per-task human stats are pre-aggregated in `metadata/task.jsonl`.
++# Mixing the two silently: the 2025 episode indices would not match 2026 task
++# ids, every stat list would come out empty, and the mean would divide by zero.
++# --------------------------------------------------------------------------
++
++
++def _data_path():
++    from omnigibson.macros import gm
++
++    return gm.DATA_PATH
++
++
++def load_available_tasks():
++    """The challenge's task -> scene/robot-start table.
++
++    3.9's evaluator reads this through `gello` (the teleop package, which we do
++    not install), so we read the yaml directly.
++    """
++    import os
++
++    import yaml
++
++    path = os.path.join(_data_path(), "2026-challenge-task-instances", "metadata", "available_tasks.yaml")
++    if not os.path.exists(path):
++        return {}
++    with open(path, "r") as f:
++        return yaml.load(f, Loader=yaml.FullLoader) or {}
++
++
++def prepare_controller_cfg(cfg, activity_name):
++    """Point an OmniGibson env config at @activity_name, keeping cap-x's robot.
++
++    On 3.9 the scene a task lives in comes from the challenge metadata -- the
++    tasks are spread over seven scenes, so the config's own `scene_model`
++    (Rs_int in the stock primitives config) is wrong for all but a few, and
++    the scene file lookup then returns None. The robots block is cap-x's tuned
++    controller/sensor setup and is carried over untouched.
++    """
++    try:
++        from omnigibson.eval.utils.eval_utils import generate_basic_environment_config
++    except ImportError:  # OmniGibson <= 3.7: the config already names a BehaviorTask
++        if activity_name is not None:
++            cfg["task"]["activity_name"] = activity_name
++            cfg["scene"]["load_room_types"] = None
++        return cfg
++
++    if activity_name is None:
++        activity_name = cfg["task"]["activity_name"]
++    available = load_available_tasks()
++    if activity_name not in available:
++        raise ValueError(
++            f"{activity_name} is not in the 2026 challenge task list "
++            f"({len(available)} tasks). Check the task name against "
++            "2026-challenge-task-instances/metadata/available_tasks.yaml."
++        )
++    task_cfg = available[activity_name][0]
++    new_cfg = generate_basic_environment_config(task_name=activity_name, task_cfg=task_cfg)
++    new_cfg["robots"] = cfg["robots"]
++    if "env" in cfg:
++        new_cfg["env"].update({k: v for k, v in cfg["env"].items() if k in new_cfg["env"]})
++    # cap-x loads every room so a recipe can reach anything the task needs.
++    new_cfg["scene"]["load_room_types"] = None
++    return new_cfg
++
++
++def load_human_stats(task_name):
++    """Mean human length / distance / eef displacement for @task_name."""
++    try:
++        from omnigibson.eval.utils.score_utils import load_human_stats as _upstream
++
++        return dict(_upstream(task_name))
++    except ImportError:
++        pass
++
++    # OmniGibson <= 3.7: aggregate the 2025 per-episode records ourselves.
++    import json
++    import os
++
++    from omnigibson.eval.utils.eval_utils import TASK_NAMES_TO_INDICES  # noqa: F401  (3.7 path)
++
++    keys = ("length", "distance_traveled", "left_eef_displacement", "right_eef_displacement")
++    task_idx = TASK_NAMES_TO_INDICES[task_name]
++    stats = {k: [] for k in keys}
++    with open(os.path.join(_data_path(), "2025-challenge-task-instances", "metadata", "episodes.jsonl")) as f:
++        for line in f:
++            episode = json.loads(line)
++            if episode["episode_index"] // 1e4 == task_idx:
++                for k in keys:
++                    stats[k].append(episode[k])
++    if not stats["length"]:
++        raise ValueError(f"No human episodes found for task {task_name}")
++    return {k: sum(v) / len(v) for k, v in stats.items()}
++
++
++def tro_state_path(scene_model, activity_name, tro_filename, mode="train"):
++    """Absolute path of a task instance's task-relevant-object state file."""
++    import os
++
++    from omnigibson.utils.asset_utils import get_task_instance_path
++
++    relative = f"{scene_model}_task_{activity_name}_instances/{tro_filename}-tro_state"
++    try:  # 3.9: (scene, instance_name) -> full path under the 2026 instances
++        path = get_task_instance_path(scene_model, relative, mode=mode)
++    except TypeError:  # <= 3.7: (scene) -> the scene's directory in the 2025 instances
++        scene_dir = get_task_instance_path(scene_model)
++        path = None if scene_dir is None else os.path.join(scene_dir, "json", f"{relative}.json")
++    if path is None:
++        raise FileNotFoundError(
++            f"No task instance state for {activity_name} / {tro_filename} in scene {scene_model} (mode={mode})"
++        )
++    return path
++
++
++def robot_assets_root():
++    """`omnigibson.ROBOT_ASSETS_ROOT` on <= 3.7; a dataset path on 3.9."""
++    try:
++        from omnigibson import ROBOT_ASSETS_ROOT
++
++        return ROBOT_ASSETS_ROOT
++    except ImportError:
++        from omnigibson.utils.asset_utils import get_dataset_path
++
++        return get_dataset_path("omnigibson-robot-assets")
++
++
++# --------------------------------------------------------------------------
++# cuRobo on Blackwell data-centre GPUs
++#
++# On the B300 (compute 10.3) cuRobo's hand-written LBFGS step kernel raises
++# `CUDA error: an illegal memory access was encountered` the first time the
++# motion generator warms up, which takes the whole process down. Measured, not
++# assumed: warmup succeeds with the PyTorch implementation of the same step and
++# fails with the kernel, for every embodiment and with CUDA graph capture both
++# on and off. Building the kernels natively for sm_103 (rather than sm_100 PTX
++# JIT-ed at load time) does not help either, so this is the kernel itself.
++#
++# OmniGibson 3.9.1 knows about the problem -- it prints a note and excludes
++# embodiments -- but only for compute 12.0, and its remedy does not apply here
++# anyway: every embodiment faults.
++#
++# cuRobo offers both implementations and the config yamls set `use_cuda_kernel:
++# True` explicitly, so the flag has to be forced after they are parsed. The
++# optimiser is unchanged; only its inner loop moves off the custom kernel.
++# --------------------------------------------------------------------------
++
++# Capabilities whose LBFGS kernel we do not trust. 12.0 is upstream's own
++# report (RTX 50-series); 10.3 is what we measured on this cluster.
++_CUROBO_LBFGS_KERNEL_BROKEN = {(10, 3), (12, 0)}
++
++_lbfgs_patched = False
++
++
++def force_curobo_torch_lbfgs(force=None):
++    """Move cuRobo's LBFGS step off its CUDA kernel where that kernel faults.
++
++    Args:
++        force (None or bool): None consults the GPU; True/False decides outright.
++            The env var CAPX_CUROBO_TORCH_LBFGS (0/1) overrides the GPU check.
++
++    Returns:
++        bool: whether the PyTorch path is now in force.
++    """
++    global _lbfgs_patched
++
++    import os
++
++    if force is None:
++        override = os.environ.get("CAPX_CUROBO_TORCH_LBFGS")
++        if override is not None:
++            force = override not in ("0", "false", "False", "")
++        else:
++            import torch as th
++
++            if not th.cuda.is_available():
++                return False
++            force = th.cuda.get_device_capability() in _CUROBO_LBFGS_KERNEL_BROKEN
++
++    if not force or _lbfgs_patched:
++        return _lbfgs_patched
++
++    from curobo.opt.newton.lbfgs import LBFGSOptConfig
++
++    _original_post_init = LBFGSOptConfig.__post_init__
++
++    def _post_init_without_cuda_kernel(self):
++        _original_post_init(self)
++        self.use_cuda_kernel = False
++
++    LBFGSOptConfig.__post_init__ = _post_init_without_cuda_kernel
++    _lbfgs_patched = True
++    print("[og_compat] cuRobo LBFGS: using the PyTorch step (kernel faults on this GPU)")
++    return True
++
++
++# --------------------------------------------------------------------------
++# metrics
++#
++# 3.7 drove metrics with start/step/end callbacks that took only the env and a
++# `gather_results()` at the end. 3.9 replaced them with reset / step(env,
++# action, obs, reward, terminated, truncated, info) / aggregate(env), where the
++# step arguments are the ones the environment just returned.
++# --------------------------------------------------------------------------
++
++
++def metric_reset(metric, env):
++    if hasattr(metric, "start_callback"):
++        metric.start_callback(env)
++    else:
++        metric.reset(env)
++
++
++def metric_step(metric, env, action=None, obs=None, reward=0.0, terminated=False, truncated=False, info=None):
++    if hasattr(metric, "step_callback"):
++        metric.step_callback(env)
++    else:
++        metric.step(env, action, obs, reward, terminated, truncated, info if info is not None else {})
++
++
++def metric_results(metric, env):
++    """Aggregated metrics for the trajectory so far."""
++    if hasattr(metric, "end_callback"):
++        metric.end_callback(env)
++        return metric.gather_results()
++    return metric.aggregate(env)
++
++
++# --------------------------------------------------------------------------
++# cuRobo CUDA graphs on Blackwell
++#
++# With the LBFGS kernel out of the way, planning gets as far as the particle
++# optimiser and then faults inside `torch.cuda.graphs.replay` (measured with
++# CUDA_LAUNCH_BLOCKING=1, so the traceback points at the failing call rather
++# than the next synchronisation). Warmup survives because it plans in an empty
++# world; the real scene is what breaks.
++#
++# OmniGibson builds the motion generator with `use_cuda_graph=True` and does
++# not thread the flag through StarterSemanticActionPrimitives, so the generator
++# is constructed here instead: the primitives are built with cuRobo skipped and
++# the generator attached afterwards. Same planner, no graph capture.
++# --------------------------------------------------------------------------
++
++
++def _curobo_cuda_graphs_broken():
++    import os
++
++    override = os.environ.get("CAPX_CUROBO_CUDA_GRAPHS")
++    if override is not None:
++        return override in ("0", "false", "False")
++
++    import torch as th
++
++    if not th.cuda.is_available():
++        return False
++    return th.cuda.get_device_capability() in _CUROBO_LBFGS_KERNEL_BROKEN
++
++
++def _build_primitives_without_cuda_graphs(env, robot, **kwargs):
++    from omnigibson.action_primitives.curobo import CuRoboMotionGenerator
++    from omnigibson.action_primitives.starter_semantic_action_primitives import m as _m
++
++    batch_size = kwargs.pop("curobo_batch_size", 3)
++    cls = _LazyPorted._cls or _build_ported_primitives()
++    _LazyPorted._cls = cls
++
++    primitives = cls(env, robot, skip_curobo_initilization=True, **kwargs)
++    primitives._motion_generator = CuRoboMotionGenerator(
++        robot=robot,
++        batch_size=batch_size,
++        collision_activation_distance=_m.DEFAULT_COLLISION_ACTIVATION_DISTANCE,
++        use_cuda_graph=False,
++    )
++    print("[og_compat] cuRobo: CUDA graph capture disabled (graph replay faults on this GPU)")
++    return primitives
+diff --git a/aspire/sim/cap/envs/simulators/r1pro_b1k.py b/aspire/sim/cap/envs/simulators/r1pro_b1k.py
+index 3f18616..eb9d921 100644
+--- a/aspire/sim/cap/envs/simulators/r1pro_b1k.py
++++ b/aspire/sim/cap/envs/simulators/r1pro_b1k.py
+@@ -46,8 +46,18 @@ from omnigibson.utils.asset_utils import get_task_instance_path
+ from omnigibson.utils.python_utils import recursively_convert_to_torch
+ import json
+ import math
+-from omnigibson.action_primitives.curobo import (
++# OmniGibson 3.9 (the only release that supports Isaac Sim 5.1, and thus
++# Blackwell GPUs) dropped this helper; og_compat falls back to a port.
++from aspire.sim.cap.envs.simulators.og_compat import (
+     holonomic_base_command_in_world_frame,
++    load_human_stats,
++    make_action_primitives,
++    metric_reset,
++    metric_results,
++    metric_step,
++    prepare_controller_cfg,
++    robot_model_name,
++    tro_state_path,
+ )
+ from omnigibson.action_primitives.action_primitive_set_base import (
+     ActionPrimitiveError,
+@@ -58,9 +68,16 @@ from scipy.spatial import ConvexHull
+ import matplotlib.pyplot as plt
+ import time
+ import random
+-from omnigibson.learning.utils.eval_utils import (
+-    TASK_NAMES_TO_INDICES,
+-)
++try:
++    # OmniGibson <= 3.7 kept the evaluation helpers under `learning`; 3.9
++    # renamed the package to `eval`. Same contents; the cluster runs 3.9.
++    from omnigibson.learning.utils.eval_utils import (
++        TASK_NAMES_TO_INDICES,
++    )
++except ModuleNotFoundError:
++    from omnigibson.eval.utils.eval_utils import (
++        TASK_NAMES_TO_INDICES,
++    )
+ from omnigibson.metrics import MetricBase, AgentMetric, TaskMetric
+ 
+ # Make sure object states are enabled
+@@ -131,10 +148,9 @@ class R1ProBehaviourLowLevel(BaseEnv):
+         super().__init__()
+         config_filename =  os.path.join(og.example_config_path, controller_cfg)
+         self.controller_cfg = yaml.load(open(config_filename, "r"), Loader=yaml.FullLoader)
+-        if activity_name is not None:
+-            self.controller_cfg['task']['activity_name'] = activity_name
+-            # Load all rooms so any task can find its required objects
+-            self.controller_cfg['scene']['load_room_types'] = None
++        # On OmniGibson 3.9 the scene a task lives in comes from the challenge
++        # metadata, so the whole scene/task block is rebuilt rather than patched.
++        self.controller_cfg = prepare_controller_cfg(self.controller_cfg, activity_name)
+         self.task_name = self.controller_cfg['task']['activity_name']
+         
+         self._step_count = 0
+@@ -146,23 +162,9 @@ class R1ProBehaviourLowLevel(BaseEnv):
+         
+         # Load config file
+         task_name = self.controller_cfg["task"]['activity_name']
+-        # Now, get human stats of the task
+-        task_idx = TASK_NAMES_TO_INDICES[task_name]
+-        self.human_stats = {
+-            "length": [],
+-            "distance_traveled": [],
+-            "left_eef_displacement": [],
+-            "right_eef_displacement": [],
+-        }
+-        with open(os.path.join(gm.DATA_PATH, "2025-challenge-task-instances", "metadata", "episodes.jsonl"), "r") as f:
+-            episodes = [json.loads(line) for line in f]
+-        for episode in episodes:
+-            if episode["episode_index"] // 1e4 == task_idx:
+-                for k in self.human_stats.keys():
+-                    self.human_stats[k].append(episode[k])
+-        # take a mean
+-        for k in self.human_stats.keys():
+-            self.human_stats[k] = sum(self.human_stats[k]) / len(self.human_stats[k])
++        # 2026 ships these pre-aggregated per task; 2025 needs the episode
++        # records averaged. load_human_stats picks whichever this release reads.
++        self.human_stats = load_human_stats(task_name)
+         
+         self.env = og.Environment(configs=self.controller_cfg)
+         
+@@ -174,7 +176,9 @@ class R1ProBehaviourLowLevel(BaseEnv):
+         self.metrics = self.load_metrics()
+         
+         
+-        self.controller = StarterSemanticActionPrimitives(self.env, self.env.robots[0], enable_head_tracking=False)
++        # On OmniGibson 3.9 this returns a subclass that restores the planner
++        # knobs (ik_only, ignore_all_obstacles, ...) this file relies on.
++        self.controller = make_action_primitives(self.env, self.env.robots[0], enable_head_tracking=False)
+         # torso_joint = self.controller.robot.joints["torso_joint2"]
+         self.torso_idx_map = {
+             "torso_joint1": 6,
+@@ -219,26 +223,22 @@ class R1ProBehaviourLowLevel(BaseEnv):
+             activity_definition_id=self.env.task.activity_definition_id,
+             activity_instance_id=instance_id,
+         )
+-        if test_hidden:
+-            tro_file_path = os.path.join(
+-                gm.DATA_PATH,
+-                "2025-challenge-test-instances",
+-                self.env.task.activity_name,
+-                f"{tro_filename}-tro_state.json",
+-            )
+-        else:
+-            tro_file_path = os.path.join(
+-                get_task_instance_path(scene_model),
+-                f"json/{scene_model}_task_{self.env.task.activity_name}_instances/{tro_filename}-tro_state.json",
+-            )
++        tro_file_path = tro_state_path(
++            scene_model,
++            self.env.task.activity_name,
++            tro_filename,
++            mode="hidden_test" if test_hidden else "train",
++        )
+             
+         with open(tro_file_path, "r") as f:
+             tro_state = recursively_convert_to_torch(json.load(f))
+         for tro_key, tro_state in tro_state.items():
+             if tro_key == "robot_poses":
+                 presampled_robot_poses = tro_state
+-                robot_pos = presampled_robot_poses[self.robot.model_name][0]["position"]
+-                robot_quat = presampled_robot_poses[self.robot.model_name][0]["orientation"]
++                # The instances key these "R1Pro"; 3.9's robot.model says "r1pro".
++                robot_key = robot_model_name(self.robot, among=presampled_robot_poses)
++                robot_pos = presampled_robot_poses[robot_key][0]["position"]
++                robot_quat = presampled_robot_poses[robot_key][0]["orientation"]
+                 self.robot.set_position_orientation(robot_pos, robot_quat)
+                 # Write robot poses to scene metadata
+                 self.env.scene.write_task_metadata(key=tro_key, data=tro_state)
+@@ -310,7 +310,7 @@ class R1ProBehaviourLowLevel(BaseEnv):
+             self.load_task_instance(0)
+             
+         for metric in self.metrics:
+-            metric.start_callback(self.env)
++            metric_reset(metric, self.env)
+             
+         self.step_num = 0
+         
+@@ -335,7 +335,8 @@ class R1ProBehaviourLowLevel(BaseEnv):
+         self._record_frame()
+         
+         for metric in self.metrics:
+-            metric.step_callback(self.env)
++            # 3.9's metrics need what the step returned, not just the env.
++            metric_step(metric, self.env, action, obs, reward, terminated, truncated, info)
+         return obs, reward, terminated, truncated, info
+     
+     
+@@ -389,11 +390,9 @@ class R1ProBehaviourLowLevel(BaseEnv):
+         if 'trash' in self.task_name:
+             return self.pick_up_trash_reward()
+ 
+-        for metric in self.metrics:
+-            metric.end_callback(self.env)
+         metrics = {}
+         for metric in self.metrics:
+-            metrics.update(metric.gather_results())
++            metrics.update(metric_results(metric, self.env))
+             
+         if self.task_completed():
+             return 1
+diff --git a/aspire/sim/cap/integrations/franka/libero_reduced_skill_library.py b/aspire/sim/cap/integrations/franka/libero_reduced_skill_library.py
+index 01e2c6d..380c61b 100644
+--- a/aspire/sim/cap/integrations/franka/libero_reduced_skill_library.py
++++ b/aspire/sim/cap/integrations/franka/libero_reduced_skill_library.py
+@@ -4,12 +4,18 @@
+ # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ # SPDX-License-Identifier: Apache-2.0
+ 
++import base64
++import io
++import json
+ import math
++import os
++import re
+ import pathlib
+ import time
+ from typing import Any
+ 
+ import numpy as np
++import requests
+ import open3d as o3d
+ import viser.transforms as vtf
+ from PIL import Image, ImageDraw
+@@ -57,6 +63,21 @@ class FrankaLiberoApiReducedSkillLibrary(FrankaLiberoApiReduced):
+         fns["interpolate_segment"] = self.interpolate_segment
+         fns["normalize_vector"] = self.normalize_vector
+         fns["select_top_down_grasp"] = self.select_top_down_grasp
++        # Skills distilled from the heuristic baseline's validated fixes.
++        fns["goto_pose_settled"] = self.goto_pose_settled
++        fns["point_at_object"] = self.point_at_object
++        fns["locate_object_points"] = self.locate_object_points
++        fns["top_down_grasp_for"] = self.top_down_grasp_for
++        fns["bowl_rim_grasp_for"] = self.bowl_rim_grasp_for
++        fns["place_pose_on_top_of"] = self.place_pose_on_top_of
++        fns["bowl_place_pose_on"] = self.bowl_place_pose_on
++        fns["survey_from_above"] = self.survey_from_above
++        fns["yaw_quat"] = self.yaw_quat
++        fns["open_drawer_by_handle"] = self.open_drawer_by_handle
++        fns["place_pose_in_container"] = self.place_pose_in_container
++        fns["wine_rack_place_pose"] = self.wine_rack_place_pose
++        fns["turn_stove_knob"] = self.turn_stove_knob
++        fns["refine_bowl_centre_from_above"] = self.refine_bowl_centre_from_above
+ 
+         return fns
+ 
+@@ -369,3 +390,634 @@ class FrankaLiberoApiReducedSkillLibrary(FrankaLiberoApiReduced):
+                     best_grasp = g_world
+ 
+         return best_grasp, best_score
++
++
++    # ------------------------------------------------------------------
++    # Skills distilled from the heuristic baseline (validated on LIBERO-PRO)
++    # ------------------------------------------------------------------
++    def goto_pose_settled(
++        self, position: np.ndarray, quaternion_wxyz: np.ndarray, z_approach: float = 0.0, tries: int = 3
++    ) -> None:
++        """Move to a pose and make sure the arm actually arrives.
++
++        A single goto_pose drives the joint controller for a fixed number of
++        steps and returns whether or not the target was reached, so a long move
++        (a target far to the side, or low near the table) can stop short with
++        no error. This reissues the same target `tries` times, which is what
++        makes long moves complete. Use it for every leg that matters: the
++        descent onto a grasp, the lift, the travel to a placement, the release.
++
++        Args:
++            position: (3,) XYZ target in metres, world frame.
++            quaternion_wxyz: (4,) target orientation, [w, x, y, z].
++            z_approach: approach from this many metres above first (0 = none).
++            tries: how many times to reissue the target (3-4 is plenty; use 5-6
++                for a target above 0.25 m or more than 0.6 m from the base).
++        """
++        self.goto_pose(position, quaternion_wxyz, z_approach=z_approach)
++        for _ in range(max(0, tries - 1)):
++            self.goto_pose(position, quaternion_wxyz)
++
++    def point_at_object(self, object_phrase: str, camera: str = "agentview") -> np.ndarray | None:
++        """Pixel (u, v) in the agentview image of the object a phrase describes.
++
++        Asks the vision-language model that also writes the code to look at the
++        current camera image and point at the object. Unlike a text-only
++        segmenter, it resolves *where* the object is relative to others, so this
++        is the tool for phrases like "bowl on the stove", "bowl next to the
++        plate", "black bowl between the plate and the ramekin", or "the bowl in
++        the open drawer" when several similar objects are visible.
++
++        Returns None if the model could not find it. Typical use is through
++        locate_object_points(), which calls this first and segments from the
++        returned point; call it directly only to inspect where it looked.
++        """
++        url = os.environ.get("CAPX_VLM_URL")
++        model = os.environ.get("CAPX_VLM_MODEL")
++        if not url or not model:
++            return None
++        obs = self.get_observation()
++        cam = obs.get(camera) or obs.get("agentview") or obs.get("robot0_robotview")
++        if cam is None:
++            return None
++        rgb = np.asarray(cam["images"]["rgb"])
++        h, w = rgb.shape[:2]
++        buf = io.BytesIO()
++        Image.fromarray(rgb).save(buf, format="JPEG", quality=90)
++        b64 = base64.b64encode(buf.getvalue()).decode()
++        # Qwen-VL models answer in a 0-1000 normalised frame regardless of the
++        # pixel size (the first run returned y=581 for a 512-tall image), so ask
++        # for that frame explicitly and scale it back to pixels.
++        prompt = (
++            f"Find the {object_phrase} in this image. Answer with only the "
++            f"coordinates of its centre as two integers 'x,y' on a 0-1000 scale "
++            f"(x: 0 = left edge, 1000 = right edge; y: 0 = top, 1000 = bottom). "
++            f"If it is not visible, answer 'none'."
++        )
++        payload = {
++            "model": model,
++            "temperature": 0.0,
++            "max_tokens": 64,
++            "chat_template_kwargs": {"enable_thinking": False},
++            "messages": [{"role": "user", "content": [
++                {"type": "text", "text": prompt},
++                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
++            ]}],
++        }
++        try:
++            r = requests.post(f"{url.rstrip('/')}/chat/completions", json=payload, timeout=120)
++            r.raise_for_status()
++            text = r.json()["choices"][0]["message"].get("content") or ""
++        except Exception:
++            return None
++        m = re.search(r"(\d+)\s*,\s*(\d+)", text)
++        if not m:
++            print(f"[point_at_object] '{object_phrase}': no coordinates in answer {text[:80]!r}")
++            return None
++        x, y = int(m.group(1)), int(m.group(2))
++        if not (0 <= x <= 1000 and 0 <= y <= 1000):
++            print(f"[point_at_object] '{object_phrase}': answer {x},{y} outside 0-1000")
++            return None
++        u = min(w - 1, max(0, int(round(x / 1000.0 * (w - 1)))))
++        v = min(h - 1, max(0, int(round(y / 1000.0 * (h - 1)))))
++        print(f"[point_at_object] '{object_phrase}' -> norm ({x}, {y}) -> pixel ({u}, {v}) of {w}x{h}")
++        return np.array([u, v])
++
++    def locate_object_points(self, object_phrase: str, camera: str = "agentview") -> np.ndarray:
++        """Point cloud (N, 3), world frame, of one object named in natural language.
++
++        The VLM points at the object first (see point_at_object), SAM3 segments
++        from that pixel, and the mask is back-projected with the depth map.
++        Spatial phrases work and are the right way to pick one of several
++        similar objects: "bowl on the stove", "bowl next to the plate",
++        "black bowl between the plate and the ramekin". A bare "bowl" returns
++        whichever one the segmenter scores highest, which is often the wrong
++        one when the scene holds several.
++
++        `camera` selects the view: "agentview" (fixed, default) or
++        "robot0_eye_in_hand" (wrist). Use the wrist view after moving the hand
++        above the scene when the fixed camera cannot see the object -- see
++        survey_from_above().
++
++        Returns an empty (0, 3) array if nothing was found.
++        """
++        obs = self.get_observation()
++        cam = obs.get(camera) or obs.get("agentview") or obs.get("robot0_robotview")
++        if cam is None:
++            return np.zeros((0, 3))
++        rgb, depth = cam["images"]["rgb"], cam["images"]["depth"]
++        K, E = cam["intrinsics"], cam["pose_mat"]
++        masks = []
++        # A text segmenter cannot tell "the bowl on the stove" from the other
++        # bowls, so ask the VLM to point first and segment from that pixel.
++        # Text segmentation stays as the fallback.
++        pt = self.point_at_object(object_phrase, camera=camera)
++        src = "none"
++        if pt is not None:
++            try:
++                masks = self.segment_sam3_point_prompt(rgb, (float(pt[0]), float(pt[1])))
++                src = "vlm-point"
++            except Exception as e:
++                print(f"[locate_object_points] point segmentation failed: {e}")
++                masks = []
++        if not masks:
++            try:
++                masks = self.segment_sam3_text_prompt(rgb, object_phrase)
++                src = "sam3-text"
++            except Exception:
++                masks = []
++        if not masks:
++            return np.zeros((0, 3))
++        best = max(masks, key=lambda d: d.get("score", 0.0)) if isinstance(masks[0], dict) else {"mask": masks[0]}
++        out = self.mask_to_world_points(best["mask"], depth, K, E)
++        if out is not None and len(out):
++            c = np.asarray(out).mean(axis=0)
++            print(f"[locate_object_points] '{object_phrase}' via {src}: n={len(out)} centre={np.round(c, 3)}")
++        return out if out is not None and len(out) else np.zeros((0, 3))
++
++    def top_down_grasp_for(self, object_phrase: str, expected_top: float | None = None,
++                           round_object: bool = False) -> tuple[np.ndarray, np.ndarray]:
++        """Grasp pose for an upright container (carton, bottle, can, box) from above.
++
++        Returns (position, quaternion_wxyz). The height comes from the object's
++        own point cloud: 2 cm below its top face, never lower than 1 cm below
++        its centroid. That is what makes one rule work for a tall carton and a
++        flat butter box alike; grasping a fixed offset above the centroid
++        closes the fingers in the air over anything short. The orientation is
++        straight down with the fingers closing along world y.
++
++        `expected_top` (metres, the object's real top height -- e.g. can 0.076,
++        pudding box 0.027, cream cheese/butter 0.018, bbq bottle 0.107, milk /
++        juice carton 0.131, ketchup / salad-dressing bottle 0.146) lets the
++        skill reject a wrong neighbour the pointer picked and, when the fixed
++        camera cannot see the object at all (it is hidden behind a taller
++        bottle), look for it with the wrist camera from above instead.
++        `round_object=True` for cans and bottles: the fixed camera sees only
++        their near half, so the centroid sits ~0.6 radius towards +x and the
++        fingers close on the edge; this shifts it back. On success the xy of
++        the top face seen from above is used, which is centred on the object.
++
++        Typical use:
++            p, q = top_down_grasp_for("tomato sauce can", expected_top=0.076, round_object=True)
++            open_gripper(); goto_pose_settled(p + np.array([0, 0, 0.12]), q, tries=4)
++            goto_pose_settled(p, q, tries=3); close_gripper()
++            goto_pose_settled(p + np.array([0, 0, 0.25]), q, tries=3)
++        """
++        pts = self.locate_object_points(object_phrase)
++        c = top_z = None
++        if len(pts) >= 20:
++            c = pts.mean(axis=0)
++            near = pts[np.linalg.norm(pts[:, :2] - c[:2], axis=1) < 0.06]
++            top_z = float(np.percentile(near[:, 2], 95)) if len(near) >= 20 else float(c[2]) + 0.02
++            if round_object and len(near) >= 20:
++                r = 0.5 * float(np.percentile(near[:, 1], 95) - np.percentile(near[:, 1], 5))
++                c = c.copy(); c[0] -= 0.6 * min(max(r, 0.012), 0.035)
++        cam_top = top_z
++        # The fixed camera's cloud misses the neck of a tall bottle, so its top
++        # can be up to 7 cm short of the real one; accept that range.
++        cam_ok = c is not None and (expected_top is None or -0.08 <= top_z - expected_top <= 0.02)
++        if expected_top is not None:
++            r = self.survey_from_above(object_phrase, expected_top=expected_top)
++            if r is not None:
++                cxy, top = r
++                # The view from above sees every object unoccluded, so when
++                # the two views name different objects it wins.
++                c = np.array([cxy[0], cxy[1], (c[2] if c is not None else top - 0.03)])
++                top_z = top if cam_top is None else cam_top
++                cam_ok = True
++        if c is None or not cam_ok:
++            raise RuntimeError(
++                f"could not locate '{object_phrase}'. Try a different phrase, "
++                "or survey_from_above() with another wording.")
++        grasp_z = max(top_z - 0.02, float(c[2]) - 0.01)
++        return np.array([c[0], c[1], grasp_z]), np.array([0.0, 1.0, 0.0, 0.0])
++
++    def bowl_rim_grasp_for(self, bowl_phrase: str, side="auto", near_phrase: str | None = None,
++                           plate_phrase: str = "white plate") -> tuple[np.ndarray, np.ndarray]:
++        """Grasp pose on the rim of a bowl that is wider than the gripper opens.
++
++        A bowl cannot be straddled, so close on its rim: one finger inside, one
++        outside. With the straight-down orientation the fingers close along
++        world y, so the grasp point sits on the bowl's +y or -y rim (`side`),
++        where the wall runs along x and lands between the fingers; a rim point
++        on the x side puts the wall parallel to the fingers and they slide off.
++        Height is 1 cm below the rim, measured from the cloud. Only the top of
++        a bowl is visible, so the radius is the akita bowl's real 5.5 cm, not
++        the cloud's extent.
++
++        Leave `side` at its default of -1.0 (the -y rim) for a bowl standing on
++        the table. Use +1.0 when the bowl stands at y < 0.03 with x between
++        0.50 and 0.88: the cabinet occupies y < -0.13 there and the 20 cm wide
++        hand runs into it on the -y rim, so the descent stalls and nothing is
++        grasped (that was every failure on "bowl next to the cookie box" and
++        "bowl on plate" in the goal scene). Also +1.0 when anything else sits
++        against the -y side (an open drawer, another object).
++
++        Typical use:
++            p, q = bowl_rim_grasp_for("black bowl next to the ramekin", near_phrase="small white ramekin cup")
++            open_gripper(); goto_pose_settled(p + np.array([0, 0, 0.12]), q, tries=4)
++            goto_pose_settled(p, q, tries=3); close_gripper()
++            goto_pose_settled(p + np.array([0, 0, 0.25]), q, tries=3)
++            place = bowl_place_pose_on("white plate")          # reuses the side chosen above
++
++        The grasp point is on the rim, so while the bowl is held its centre is
++        5.5 cm away from the gripper on the opposite side (+y for side=-1.0).
++        The task is judged on where the bowl's centre lands, not the gripper:
++        release it with `bowl_place_pose_on(...)`, not `place_pose_on_top_of`.
++
++        `side` may also be "-x": the hand is turned a quarter turn (fingers
++        closing along x) and the -x rim, the one nearest the robot, is taken.
++        That is the grasp for a bowl on the cabinet top, for a bowl boxed in
++        on both y sides, and whenever the plate stands beyond x = 0.75: a bowl
++        hanging on the y side of the fingers would need the hand at x ~ 0.82
++        to be released over such a plate, past the arm's reach, whereas held
++        by its -x rim it hangs towards +x and the hand stays at ~0.75.
++        `side="auto"` (default) picks -1.0, +1.0 or "-x" from the cabinet's
++        position, the plate's position (`plate_phrase`) and the bowl's height,
++        and prints its choice; pass that same value to bowl_place_pose_on.
++
++        `near_phrase` names the object the task says the bowl is next to
++        ("small white ramekin cup", "cookie box"). The pointer often returns
++        the other bowl for "bowl next to the ramekin"; with `near_phrase` the
++        skill checks the distance to that object and, if it is more than
++        18 cm, tries other wordings and keeps the candidate nearest to it.
++            open_gripper(); goto_pose_settled(p, q, z_approach=0.12, tries=4); close_gripper()
++            goto_pose_settled(p + np.array([0, 0, 0.25]), q, tries=3)
++        """
++        pts = self.locate_object_points(bowl_phrase)
++        if len(pts) < 20:
++            raise RuntimeError(
++                f"could not locate '{bowl_phrase}'. Name the bowl by where it "
++                "is, e.g. 'bowl on the stove'; a bare 'bowl' often misses." )
++        pts = pts[pts[:, 2] > float(np.percentile(pts[:, 2], 20))]
++        c = pts[:, :2].mean(axis=0)
++        rim_z = float(np.percentile(pts[:, 2], 90))
++        if near_phrase:
++            apts = self.locate_object_points(near_phrase)
++            if len(apts) >= 10:
++                a = apts[:, :2].mean(axis=0)
++                best = (float(np.linalg.norm(c - a)), c, rim_z)
++                if best[0] > 0.18:
++                    for alt in ("black bowl", f"the other black bowl, the one beside the {near_phrase}",
++                                f"black bowl closest to the {near_phrase}"):
++                        q = self.locate_object_points(alt)
++                        if len(q) < 20:
++                            continue
++                        q = q[q[:, 2] > float(np.percentile(q[:, 2], 20))]
++                        cq = q[:, :2].mean(axis=0); dq = float(np.linalg.norm(cq - a))
++                        if dq < best[0]:
++                            best = (dq, cq, float(np.percentile(q[:, 2], 90)))
++                    print(f"[bowl_rim_grasp_for] nearest to '{near_phrase}': {np.round(best[1], 3)} ({best[0]:.2f} m)")
++                    _, c, rim_z = best
++        self._last_bowl_side = side
++        if side == "auto":
++            side = -1.0
++            plate = self.locate_object_points(plate_phrase)
++            far_plate = len(plate) >= 20 and float(plate[:, 0].mean()) > 0.75
++            cab = self.locate_object_points("wooden cabinet")
++            if len(cab) >= 20 and rim_z < 0.15:
++                cx, cy = float(cab[:, 0].mean()), float(cab[:, 1].mean())
++                def hits(gy):
++                    return (abs(c[0] - cx) < 0.18) and (gy - 0.10 < cy + 0.15) and (gy + 0.10 > cy - 0.15)
++                if hits(c[1] - 0.055):
++                    side = 1.0 if not hits(c[1] + 0.055) else "-x"
++            if rim_z > 0.20 or far_plate:
++                side = "-x"
++            print(f"[bowl_rim_grasp_for] side auto -> {side}")
++            self._last_bowl_side = side
++        if side == "-x":
++            r = SciRotation.from_rotvec([0.0, 0.0, np.pi / 2]) * SciRotation.from_quat([1.0, 0.0, 0.0, 0.0])
++            x, y, z, w = r.as_quat()
++            return np.array([c[0] - 0.055, c[1], rim_z - 0.01]), np.array([w, x, y, z])
++        sgn = 1.0 if float(side) >= 0 else -1.0
++        return np.array([c[0], c[1] + sgn * 0.055, rim_z - 0.01]), np.array([0.0, 1.0, 0.0, 0.0])
++
++    def bowl_place_pose_on(self, target_phrase: str, side="auto") -> np.ndarray:
++        """Gripper position that sets a rim-held bowl down centred on the target.
++
++        "Place the bowl on the plate" is checked on the bowl's centre: it has to
++        end up within 3 cm of the target's centre, resting on it. With the rim
++        grasp from `bowl_rim_grasp_for` the bowl's centre is 5.5 cm from the
++        gripper on the -side direction of y, so the gripper is offset by that
++        much the other way. The bowl is 4 cm tall and is held 1 cm below its
++        rim, so 5 cm above the target's top surface leaves the base 2 cm up:
++        low enough not to bounce off-centre, high enough not to hit the rim.
++        Pass the same `side` you gave `bowl_rim_grasp_for`, or leave it at
++        "auto" to reuse whatever side that call chose.
++
++        Typical use (after lifting the bowl):
++            place = bowl_place_pose_on("white plate", side=-1.0)
++            goto_pose_settled(place + np.array([0, 0, 0.12]), q, tries=4)
++            goto_pose_settled(place, q, tries=3)
++            open_gripper()
++            goto_pose_settled(place + np.array([0, 0, 0.20]), q, tries=3)
++        """
++        pts = self.locate_object_points(target_phrase)
++        if len(pts) < 20:
++            raise RuntimeError(f"could not locate '{target_phrase}'.")
++        c = pts.mean(axis=0)
++        top = float(np.percentile(pts[:, 2], 95))
++        if side == "auto":
++            side = getattr(self, "_last_bowl_side", -1.0)
++            if side == "auto":
++                side = -1.0
++        if side == "-x":
++            # held by its -x rim the bowl hangs ~4.5 cm towards +x of the fingers
++            pose = np.array([c[0] - 0.045, c[1], top + 0.05])
++        else:
++            sgn = 1.0 if float(side) >= 0 else -1.0
++            pose = np.array([c[0], c[1] + sgn * 0.055, top + 0.05])
++        print(f"[bowl_place_pose_on] '{target_phrase}' centre={np.round(c, 3)} top={top:.3f} -> gripper {np.round(pose, 3)}")
++        return pose
++
++    def survey_from_above(self, object_phrase: str, expected_top: float | None = None,
++                          hover: tuple[float, float, float] = (0.57, -0.09, 0.50)) -> tuple[np.ndarray, float] | None:
++        """Find an object with the wrist camera from high above the table.
++
++        On the plain LIBERO table the target often stands right behind a taller
++        bottle and the fixed camera cannot see it at all; every phrase then
++        returns a neighbour (asked for the pudding box it kept returning the
++        juice carton, top at 0.13 m instead of 0.03 m). From straight above,
++        every top face is visible. This moves the hand to `hover` pointing
++        down, points and segments in the wrist image, and back-projects it.
++
++        Returns (centre, top_z) where centre is the middle of the object's top
++        face -- exactly where a top-down grasp goes -- and top_z its height, or
++        None if nothing plausible was seen. If `expected_top` (the object's
++        known top height, metres) is given, an answer more than 3 cm off is
++        rejected, which is how a wrong neighbour is told apart.
++
++        Typical use, after the fixed camera's answer failed a height check:
++            r = survey_from_above("chocolate pudding box", expected_top=0.03)
++            if r is not None:
++                c, top = r
++                p = np.array([c[0], c[1], top - 0.02]); q = np.array([0, 1, 0, 0])
++                open_gripper(); goto_pose_settled(p + np.array([0, 0, 0.12]), q, tries=4)
++                goto_pose_settled(p, q, tries=3); close_gripper()
++        """
++        q = np.array([0.0, 1.0, 0.0, 0.0])
++        self.goto_pose_settled(np.asarray(hover, dtype=float), q, tries=2)
++        pts = self.locate_object_points(object_phrase, camera="robot0_eye_in_hand")
++        if len(pts) < 30:
++            print(f"[survey_from_above] '{object_phrase}': only {len(pts)} points")
++            return None
++        top = float(np.percentile(pts[:, 2], 95))
++        # Only the very top: a band 3 cm deep took in a side face of a tall
++        # carton and pulled the centre 1-3 cm towards the camera.
++        face = pts[pts[:, 2] > top - 0.012]
++        c = face[:, :2].mean(axis=0)
++        print(f"[survey_from_above] '{object_phrase}' centre={np.round(c, 3)} top={top:.3f}")
++        if expected_top is not None and abs(top - expected_top) > 0.03:
++            print(f"[survey_from_above] rejected: top {top:.3f} vs expected {expected_top:.3f}")
++            return None
++        return np.array([c[0], c[1]]), top
++
++    def refine_bowl_centre_from_above(self, bowl_phrase: str, centre_xy: np.ndarray, rim_z: float) -> tuple[np.ndarray, float]:
++        """Re-measure a bowl's centre and rim height from the wrist camera.
++
++        The fixed camera sees a bowl at a low angle; for one standing close to
++        the robot (x ~ 0.46) the visible cap's centroid came out 3-4 cm off,
++        more than a rim grasp forgives. From straight above the rim is a full
++        circle and its centroid is the true centre. Hovers 30 cm over the
++        first estimate, segments in the wrist view, keeps only points within
++        9 cm of the estimate (so the pointer cannot swap in the other bowl)
++        and returns (centre_xy, rim_z). Falls back to the inputs if the view
++        yields too few points.
++
++        Typical use:
++            p, q = bowl_rim_grasp_for("bowl next to the ramekin")    # first estimate
++            c, rim = refine_bowl_centre_from_above("bowl next to the ramekin", p[:2] + [0, 0.055], p[2] + 0.01)
++            p = np.array([c[0], c[1] - 0.055, rim - 0.01])
++        """
++        centre_xy = np.asarray(centre_xy, dtype=float)
++        q = np.array([0.0, 1.0, 0.0, 0.0])
++        self.goto_pose_settled(np.array([centre_xy[0], centre_xy[1], rim_z + 0.30]), q, tries=2)
++        pts = self.locate_object_points(bowl_phrase, camera="robot0_eye_in_hand")
++        if len(pts):
++            pts = pts[np.linalg.norm(pts[:, :2] - centre_xy, axis=1) < 0.09]
++        top = float(np.percentile(pts[:, 2], 95)) if len(pts) else -1.0
++        # A wrong mask (table instead of bowl) shows up as a rim far below the
++        # one measured first; keep the inputs then.
++        if len(pts) < 100 or abs(top - rim_z) > 0.02:
++            print(f"[refine_bowl_centre_from_above] kept inputs (n={len(pts)}, rim {top:.3f})")
++            return centre_xy, rim_z
++        rim = pts[pts[:, 2] > top - 0.015]
++        c = rim[:, :2].mean(axis=0)
++        print(f"[refine_bowl_centre_from_above] centre {np.round(centre_xy, 3)} -> {np.round(c, 3)}, rim_z {rim_z:.3f} -> {top:.3f}")
++        return c, top
++
++    def yaw_quat(self, psi: float) -> np.ndarray:
++        """Straight-down gripper orientation turned by `psi` radians about the vertical axis.
++
++        psi = 0 is the usual [0, 1, 0, 0] (fingers close along world y);
++        psi = pi/2 closes them along x. Two uses:
++          - grasping a rim or bar whose wall runs along y instead of x;
++          - turning a knob: close the fingers across the knob, then call
++            goto_pose_settled at the same position with yaw_quat(psi) for
++            psi = 0.35, 0.7, 1.0 in turn. The stove knob is a vertical disc
++            on a hinge and counts as "on" past 0.5 rad; pushing it sideways
++            with the fingertips stalled at ~0.25 rad, twisting it reached
++            1.0 rad every time. Grip 2 cm above the point the knob was
++            located at, so the fingers straddle the top of the disc.
++        """
++        r = SciRotation.from_rotvec([0.0, 0.0, float(psi)]) * SciRotation.from_quat([1.0, 0.0, 0.0, 0.0])
++        x, y, z, w = r.as_quat()
++        return np.array([w, x, y, z])
++
++    def open_drawer_by_handle(self, handle_phrase: str = "middle silver handle on the black cabinet",
++                              cabinet_phrase: str = "black cabinet", pull: float = 0.22) -> np.ndarray:
++        """Open a cabinet drawer by grasping its handle bar and pulling straight out.
++
++        The grasp planner finds nothing on a thin handle bar, so the grasp is
++        built directly: locate the cabinet body and the handle, take the
++        horizontal direction from body to handle as the pull axis, approach
++        head-on along that axis with the fingers closing vertically across
++        the bar, close, and pull out `pull` metres in two legs without
++        lifting. Returns the unit pull direction so a later step (putting
++        something into the open drawer) knows where the drawer now is.
++
++        Name the handle by its row and colour, e.g. "top silver handle on the
++        black cabinet" for the top drawer, "middle silver handle ..." for the
++        middle one. Ends with the gripper open, 30 cm out from the handle.
++        """
++        c_pts = self.locate_object_points(cabinet_phrase)
++        h_pts = self.locate_object_points(handle_phrase)
++        if len(c_pts) < 20 or len(h_pts) < 5:
++            raise RuntimeError("could not locate the cabinet or its handle")
++        c_pos, h_pos = c_pts.mean(axis=0), h_pts.mean(axis=0)
++        pull_dir = h_pos - c_pos; pull_dir[2] = 0.0
++        n = np.linalg.norm(pull_dir)
++        pull_dir = pull_dir / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
++        # The cabinet's cloud centroid sits on its visible front, which tilts
++        # this vector by 20-30 deg; a drawer slides along one table axis, so
++        # snap to the dominant one.
++        ax = int(np.argmax(np.abs(pull_dir[:2])))
++        snapped = np.zeros(3); snapped[ax] = np.sign(pull_dir[ax]); pull_dir = snapped
++        zc = -pull_dir; yc = np.array([0.0, 0.0, 1.0])
++        xc = np.cross(yc, zc); xc /= np.linalg.norm(xc); zc = np.cross(xc, yc)
++        qx, qy, qz, qw = SciRotation.from_matrix(np.column_stack([xc, yc, zc])).as_quat()
++        q = np.array([qw, qx, qy, qz])
++        print(f"[open_drawer_by_handle] handle {np.round(h_pos, 3)} pull_dir {np.round(pull_dir, 3)}")
++        self.open_gripper()
++        self.goto_pose_settled(h_pos + 0.12 * pull_dir, q, tries=5)
++        self.goto_pose_settled(h_pos, q, tries=4)
++        self.close_gripper()
++        self.goto_pose_settled(h_pos + 0.5 * pull * pull_dir, q, tries=3)
++        self.goto_pose_settled(h_pos + pull * pull_dir, q, tries=4)
++        self.open_gripper()
++        self.goto_pose_settled(h_pos + (pull + 0.08) * pull_dir, q, tries=3)
++        return pull_dir
++
++    def place_pose_in_container(self, container_phrase: str, grasp_above_base: float = 0.08) -> np.ndarray:
++        """Release position that drops a held object into an open container (basket).
++
++        "In the basket" is judged on the object's origin being within ~6 cm of
++        the basket's centre, and the fixed camera's basket centroid is a few
++        cm off; a drop from 20 cm then bounced objects into a back corner or
++        onto the rim. This hovers 45 cm over the container (call it while
++        holding the object -- the rim ring stays visible around it), measures
++        the rim from the wrist camera, and returns the gripper position that
++        puts the object's base 3 cm above the rim, centred.
++        `grasp_above_base` is how far above the object's base you grasped it
++        (grasp height minus table height; the table is at z = -0.013).
++
++        Typical use:
++            place = place_pose_in_container("woven basket", grasp_above_base=p[2] + 0.013)
++            goto_pose_settled(place, q, tries=4); open_gripper()
++            goto_pose_settled(place + np.array([0, 0, 0.12]), q, tries=2)
++        """
++        q = np.array([0.0, 1.0, 0.0, 0.0])
++        pts = self.locate_object_points(container_phrase)
++        if len(pts) < 20:
++            raise RuntimeError(f"could not locate '{container_phrase}'.")
++        c = pts.mean(axis=0); top = float(np.percentile(pts[:, 2], 95))
++        # The fixed camera's centroid sits on the front wall, ~5 cm towards +x
++        # of the centre; start from the corrected guess.
++        c = np.array([c[0] - 0.05, c[1], c[2]])
++        # Two looks: the fixed camera's centroid sits on the front wall, so the
++        # first look is off-centre; the second is from over the corrected
++        # centre. Points at the held object's height and right under the hand
++        # are dropped, and the rim centre comes from its extent.
++        for _ in range(2):
++            look = np.array([c[0], c[1], 0.45])
++            self.goto_pose_settled(look, q, tries=4)
++            wpts = self.locate_object_points(container_phrase, camera="robot0_eye_in_hand")
++            if len(wpts):
++                wpts = wpts[(wpts[:, 2] > 0.03) & (wpts[:, 2] < 0.20)]
++                wpts = wpts[np.linalg.norm(wpts[:, :2] - c[:2], axis=1) < 0.16]
++                wpts = wpts[np.linalg.norm(wpts[:, :2] - look[:2], axis=1) > 0.05]
++            wtop = float(np.percentile(wpts[:, 2], 95)) if len(wpts) else -1.0
++            rim = wpts[wpts[:, 2] > wtop - 0.03] if len(wpts) else wpts
++            # A few hundred rim points means one wall only and the centre
++            # drifts the wrong way; a full ring gives thousands.
++            if len(rim) < 1500:
++                print(f"[place_pose_in_container] kept previous estimate (rim n={len(rim)})")
++                break
++            top = wtop
++            cxy = 0.5 * (np.percentile(rim[:, :2], 2, axis=0) + np.percentile(rim[:, :2], 98, axis=0))
++            c = np.array([cxy[0], cxy[1], top])
++            print(f"[place_pose_in_container] refined from above: centre={np.round(c[:2], 3)} top={top:.3f}")
++        return np.array([c[0], c[1], top + grasp_above_base + 0.03])
++
++    def wine_rack_place_pose(self, rack_phrase: str = "wine rack", neck_above_base: float = 0.13) -> tuple[np.ndarray, np.ndarray]:
++        """Gripper pose that lays a neck-held wine bottle onto the rack.
++
++        "On the rack" is judged on the bottle's BASE: it has to sit in a thin
++        slab 22-27 cm up, just inside the rack's lower rail, with the bottle
++        leaning back along the rack's slanted board (62 deg from the table).
++        Dropping the bottle upright onto the rack never did that -- it fell
++        off every time. What works: hold the bottle by the neck just above
++        the shoulder (grasp 2 cm below the top the fixed camera's cloud
++        reports, i.e. top_down_grasp_for("wine bottle") -- the shoulder then
++        interlocks with the fingers; a pinch higher up the smooth neck slips),
++        lift 25 cm, then move to the pose this returns and open. The pose
++        tilts the bottle 28 deg off vertical towards -y, parallel to the
++        board, with its base on the rail: 3 cm on the +y side of the rack's
++        cloud centroid and 4 cm above it. Back out along +y and up after
++        releasing so the open fingers do not drag it off.
++
++        Returns (position, quaternion_wxyz).
++        Typical use:
++            p, q = top_down_grasp_for("wine bottle")
++            open_gripper(); goto_pose_settled(p + np.array([0, 0, 0.10]), q, tries=4)
++            goto_pose_settled(p, q, tries=3); close_gripper()
++            goto_pose_settled(p + np.array([0, 0, 0.25]), q, tries=3)
++            tcp, tq = wine_rack_place_pose("wine rack")
++            goto_pose_settled(tcp + np.array([0, 0, 0.12]), tq, tries=4)
++            goto_pose_settled(tcp, tq, tries=4); open_gripper()
++            goto_pose(tcp, tq); goto_pose(tcp, tq)
++            goto_pose_settled(tcp + np.array([0, 0.05, 0.15]), tq, tries=2)
++            goto_pose_settled(np.array([0.45, 0.0, 0.40]), q, tries=2)
++        """
++        pts = self.locate_object_points(rack_phrase)
++        if len(pts) < 20:
++            raise RuntimeError(f"could not locate '{rack_phrase}'.")
++        rack = pts.mean(axis=0)
++        base_target = np.array([rack[0], rack[1] + 0.03, rack[2] + 0.04])
++        axis = np.array([0.0, -0.462, 0.887])          # bottle axis, parallel to the board
++        z_tool = -axis                                  # tool z points down the bottle towards its base
++        y_tool = np.array([1.0, 0.0, 0.0])              # fingers close along x, across the neck
++        x_tool = np.cross(y_tool, z_tool); x_tool = x_tool / np.linalg.norm(x_tool)
++        y_tool = np.cross(z_tool, x_tool)
++        qx, qy, qz, qw = SciRotation.from_matrix(np.column_stack([x_tool, y_tool, z_tool])).as_quat()
++        tcp = base_target + neck_above_base * axis
++        print(f"[wine_rack_place_pose] rack centroid {np.round(rack, 3)} -> base target {np.round(base_target, 3)}, tcp {np.round(tcp, 3)}")
++        return tcp, np.array([qw, qx, qy, qz])
++
++    def turn_stove_knob(self, knob_phrase: str = "stove knob", angle: float = 1.0) -> float:
++        """Turn the stove on by gripping its knob and twisting the wrist.
++
++        The knob is a vertical disc (radius 3.4 cm) on a hinge about the
++        vertical axis; the stove counts as "on" past 0.5 rad. Pushing the
++        disc sideways with the fingertips stalled at ~0.25 rad (the joint
++        controller is compliant), while gripping it and yawing the wrist
++        reached 1.0 rad every time. Grips 2 cm above the point the knob was
++        located at (straddling the top of the disc, fingers closing across
++        its faces), twists in three steps to `angle`, opens, and lifts.
++        Returns the yaw reached. Nothing else to do for "turn on the stove".
++        """
++        pts = self.locate_object_points(knob_phrase)
++        if len(pts) < 10:
++            pts = self.locate_object_points("black knob on the stove")
++        if len(pts) < 10:
++            raise RuntimeError("could not locate the stove knob")
++        knob = pts.mean(axis=0)
++        grip = np.array([knob[0], knob[1], knob[2] + 0.02])
++        print(f"[turn_stove_knob] knob {np.round(knob, 3)} grip {np.round(grip, 3)}")
++        self.open_gripper()
++        self.goto_pose_settled(grip + np.array([0.0, 0.0, 0.12]), self.yaw_quat(0.0), tries=4)
++        self.goto_pose_settled(grip, self.yaw_quat(0.0), tries=3)
++        self.close_gripper()
++        psi = 0.0
++        for psi in (angle * 0.35, angle * 0.7, angle):
++            self.goto_pose_settled(grip, self.yaw_quat(psi), tries=2)
++        self.open_gripper()
++        self.goto_pose_settled(grip + np.array([0.0, 0.0, 0.12]), self.yaw_quat(psi), tries=2)
++        return psi
++
++    def place_pose_on_top_of(self, target_phrase: str, clearance: float = 0.06) -> np.ndarray:
++        """Position to release an object so it lands on top of the target.
++
++        Targets differ a lot in height (a plate is flat, a stove is a few cm
++        up, a cabinet top is ~30 cm up), so the top surface is read from the
++        target's point cloud and the release point is `clearance` above it.
++        For a target higher than ~0.15 m first rise to the release height at
++        your current xy, then travel across, then descend -- a straight
++        diagonal move stops short. For a low target go straight there; the
++        detour knocks the object out of the gripper.
++
++        Typical use:
++            place = place_pose_on_top_of("white plate", clearance=0.03)
++            if place[2] > 0.15:
++                goto_pose_settled(np.array([here[0], here[1], place[2] + 0.12]), q, tries=4)
++            goto_pose_settled(place + np.array([0, 0, 0.12]), q, tries=6)
++            goto_pose_settled(place, q, tries=4); open_gripper()
++            for _ in range(3): goto_pose(place, q)          # let it settle
++            goto_pose_settled(place + np.array([0, 0, 0.20]), q, tries=3)
++        """
++        pts = self.locate_object_points(target_phrase)
++        if len(pts) < 20:
++            raise RuntimeError(f"could not locate '{target_phrase}'.")
++        c = pts.mean(axis=0)
++        top = float(np.percentile(pts[:, 2], 95))
++        return np.array([c[0], c[1], top + clearance])
+diff --git a/aspire/sim/cap/integrations/motion/pyroki.py b/aspire/sim/cap/integrations/motion/pyroki.py
+index e24a72b..692abdb 100644
+--- a/aspire/sim/cap/integrations/motion/pyroki.py
++++ b/aspire/sim/cap/integrations/motion/pyroki.py
+@@ -6,6 +6,8 @@
+ 
+ from __future__ import annotations
+ 
++import os
++
+ from collections.abc import Callable
+ from typing import Any
+ 
+@@ -15,7 +17,7 @@ from scipy.spatial.transform import Rotation as SciRotation
+ 
+ from aspire.sim.cap.utils.serve_utils import post_with_retries
+ 
+-DEFAULT_URL = "http://127.0.0.1:8116"
++DEFAULT_URL = os.environ.get("PYROKI_SERVICE_URL", "http://127.0.0.1:8116")
+ 
+ 
+ def init_pyroki(
+diff --git a/aspire/sim/cap/integrations/r1pro/utils.py b/aspire/sim/cap/integrations/r1pro/utils.py
+index 1afc02d..cf8161f 100644
+--- a/aspire/sim/cap/integrations/r1pro/utils.py
++++ b/aspire/sim/cap/integrations/r1pro/utils.py
+@@ -10,8 +10,11 @@ import numpy as np
+ from scipy.spatial import ConvexHull
+ import numpy.typing as npt
+ import omnigibson.utils.transform_utils as T
+-from omnigibson import ROBOT_ASSETS_ROOT
+-print(ROBOT_ASSETS_ROOT)
++# OmniGibson 3.9 dropped the module-level constant; the assets moved
++# under the dataset root.
++from aspire.sim.cap.envs.simulators.og_compat import robot_assets_root
++
++ROBOT_ASSETS_ROOT = robot_assets_root()
+ 
+ def relative_pose_transform(pos1, quat1, pos0, quat0):
+     """
+diff --git a/aspire/sim/cap/integrations/vision/molmo.py b/aspire/sim/cap/integrations/vision/molmo.py
+index c2ef78b..9cd7471 100644
+--- a/aspire/sim/cap/integrations/vision/molmo.py
++++ b/aspire/sim/cap/integrations/vision/molmo.py
+@@ -20,7 +20,9 @@ _PROC: Any | None = None  # kept for backward compatibility; unused with vLLM HT
+ _MODEL: Any | None = None  # kept for backward compatibility; unused with vLLM HTTP API
+ 
+ # SERVICE_URL = "https://openrouter.ai/api/" # OpenRouter
+-SERVICE_URL = "http://127.0.0.1:8122/v1"  # local
++# Same pattern GraspNet already uses: the port moves when several jobs share
++# a node, so read the URL from the environment and keep 8122 as the default.
++SERVICE_URL = os.environ.get("CAPX_MOLMO_URL", "http://127.0.0.1:8122/v1")
+ 
+ 
+ 
+diff --git a/aspire/sim/cap/integrations/vision/sam3.py b/aspire/sim/cap/integrations/vision/sam3.py
+index c39539a..741b4da 100644
+--- a/aspire/sim/cap/integrations/vision/sam3.py
++++ b/aspire/sim/cap/integrations/vision/sam3.py
+@@ -6,6 +6,8 @@
+ 
+ from __future__ import annotations
+ 
++import os
++
+ import base64
+ import io
+ import pathlib
+@@ -23,7 +25,7 @@ from aspire.sim.cap.utils.serve_utils import post_with_retries
+ """SAM 3 integration via FastAPI service."""
+ 
+ # Configuration
+-SERVICE_URL = "http://127.0.0.1:8114"
++SERVICE_URL = os.environ.get("SAM3_SERVICE_URL", "http://127.0.0.1:8114")
+ 
+ 
+ def _encode_image(image: np.ndarray | Image.Image) -> str:
+diff --git a/aspire/sim/cap/llm/client.py b/aspire/sim/cap/llm/client.py
+index 692568b..93312ba 100644
+--- a/aspire/sim/cap/llm/client.py
++++ b/aspire/sim/cap/llm/client.py
+@@ -36,6 +36,15 @@ GPT_MODELS = [
+     "openai/o4-mini",
+ ]
+ VLM_MODELS = [
++    # Local open-weight VLM: the baseline rules forbid a proprietary model
++    # anywhere in the loop, and this is the vision model we serve.
++    # Qwen3.8-27B is itself a vision-language model, so it can do the visual
++    # differencing without a second VLM. Molmo stays listed but its chat
++    # template refuses system messages and non-alternating roles, which is
++    # exactly the shape ASPIRE sends.
++    "Qwen/Qwen3.8-27B",
++    "Qwen/Qwen3.6-27B",
++    "allenai/Molmo2-8B",
+     "google/gemini-3.1-pro-preview",
+     "gcp/google/gemini-3.1-pro-preview",  # NVIDIA inference API prefix
+     "google/gemini-2.5-flash-lite",
+@@ -265,6 +274,19 @@ def query_model(args: "LaunchArgs | ModelQueryArgs", prompt: list[dict]) -> str:
+ 
+     end_time = time.time()
+     print(f"Time taken to query model: {end_time - start_time:.2f} seconds")
++    if not response.ok:
++        # 400 is not retryable here, so the trial dies with only the status code
++        # in the traceback. Surface the server's explanation once.
++        print(f"[diag] {response.status_code} from {server_url}: {response.text[:800]}")
++        try:
++            shapes = [
++                (m.get("role"), [c.get("type") for c in m["content"]]
++                 if isinstance(m.get("content"), list) else "str")
++                for m in payload.get("messages", [])
++            ]
++            print(f"[diag] message shapes: {shapes}")
++        except Exception:
++            pass
+     response.raise_for_status()
+     body = response.json()
+     out = {}

@@ -1,0 +1,5 @@
+sources:
+  - run_tag: fixture
+    task: cube_lifting
+    trials_dir: trials/Qwen_Qwen3.8-27B/cube_lifting
+    config: cube_lifting.yaml
