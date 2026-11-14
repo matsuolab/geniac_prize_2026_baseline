@@ -12,9 +12,13 @@ image の作り方、手元での評価、提出の手順は、すべて
 
 ## geniac_prize_2026_code を clone する
 
+GPU 無しで計算ノードを確保し、clone する。
+
 ```bash
 cd <共用ストレージ>/<ユーザー名>
+srun --partition=<パーティション> --cpus-per-task=1 --mem=2G --time=00:10:00 --pty bash
 git clone git@github.com:matsuolab/geniac_prize_2026_code.git
+exit
 ```
 
 [4 章](04_install.md)の `bash patches/geniac_prize/setup.sh` が作る `geniac_prize_2026_baseline/geniac_prize_2026_code/` も
@@ -38,7 +42,7 @@ git clone git@github.com:matsuolab/geniac_prize_2026_code.git
 登録(ルールブック §6.1)も済んでいるものとする。評価中に使うモデル(Qwen3.6-27B、SAM3 など。
 `singularity/capx-submission-agent0.yaml` の `weights`)は、提出の前に申告する(ルールブック §7.2)。
 
-1. image が使う submodule を取る(`docs/operations.md` の「2. 準備」の「イメージ」の表の `submission-agent0` の行)。
+1. 計算ノードで、image が使う submodule を取る(`docs/operations.md` の「2. 準備」の「イメージ」の表の `submission-agent0` の行)。
 
 2. 計算ノードで image を build する。build はログインノードでは行えない(`singularity/build.sh` が止める)。
    ログは `capx-sif-build.<jobid>.log` に出て、最後に `[build] done: submission-agent0` が出れば、

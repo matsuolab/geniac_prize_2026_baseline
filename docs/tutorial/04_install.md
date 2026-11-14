@@ -12,24 +12,34 @@
 
 | 環境(`geniac_prize_2026_baseline/` から) | Python | 中身 | 使う所 |
 | --- | --- | --- | --- |
-| `.venv` | 3.12 | このパッケージ、テスト、学習(torch、transformers、peft)、W&B、Hugging Face | 5〜9 章 |
+| `.venv` | 3.12 | このパッケージ、テスト、学習(torch、transformers、peft)、W&B、Hugging Face | 5〜10 章 |
 | `geniac_prize_2026_code/.venv` | 3.10 | CaP-X、Robosuite 1.5.1 | Robosuite の収集と評価 |
 | `geniac_prize_2026_code/.venv-libero` | 3.12 | CaP-X、LIBERO-PRO、Robosuite 1.4.0 | LIBERO-PRO の収集と評価 |
 | `geniac_prize_2026_code/.venv-serve` | 3.12 | vLLM 0.26.0 | Qwen3.8-27B と Molmo2-8B のサーバー |
 
-1. ログインノードに [uv](https://docs.astral.sh/uv/) を入れる。Python 本体も uv が入れるので、クラスタの Python の
-   module は使わない。`uv --version` でバージョンが表示されれば、入れる必要はない。
+1. GPU 無しで計算ノードを確保する。5 番まではこの計算ノードで続けて行う。時間切れや接続の切断で計算ノードから
+   抜けた時は、同じ `srun` で入り直し、続きの番号から行う。
 
    ```bash
+   cd <共用ストレージ>/<ユーザー名>/geniac_prize_2026_baseline
+   srun --partition=<パーティション> --cpus-per-task=4 --mem=8G --time=01:00:00 --pty bash
+   ```
+
+   `hostname` が計算ノードの物であることを確かめてから、[uv](https://docs.astral.sh/uv/) を入れる。Python 本体も
+   uv が入れるので、クラスタの Python の module は使わない。`uv --version` でバージョンが表示されれば、uv を入れる
+   必要はない。
+
+   ```bash
+   hostname                      # ログインノードの物なら、上の srun をやり直す
    curl -LsSf https://astral.sh/uv/install.sh | sh
    source "$HOME/.local/bin/env"
    uv --version
    ```
 
    uv はダウンロードした物を `~/.cache/uv` に置く。ホームディレクトリの容量が小さい場合は、`~/.bashrc` に
-   `export UV_CACHE_DIR=<共用ストレージ>/<ユーザー名>/.cache/uv` を書く。
+   `export UV_CACHE_DIR=<共用ストレージ>/<ユーザー名>/.cache/uv` を書き、`source ~/.bashrc` で読み込む。
 
-2. ログインノードで、ベースラインの環境 `.venv` を作る。ダウンロードとインストールだけなので、GPU は要らない。
+2. ベースラインの環境 `.venv` を作る。ダウンロードとインストールだけなので、GPU は要らない。
    `requirements-train.txt` が学習のライブラリをベースラインの学習と同じバージョン(torch 2.9.1、CUDA 13.0)に固定する。
 
    ```bash
@@ -40,11 +50,11 @@
    uv pip check                  # "All installed packages are compatible" と出れば良い
    ```
 
-   extra の `dev` はテスト([5 章](05_test.md))、`train` は SFT と DMPO(7 章)、`wandb` は W&B 連携(6 章)、`hub` は
-   Hugging Face(9 章)に使う。GPU を使わない作業(テスト、変換、計画)だけなら、CI と同じ `uv pip install -e ".[dev]"`
+   extra の `dev` はテスト([5 章](05_test.md))、`train` は SFT と DMPO(8 章)、`wandb` は W&B 連携(6 章)、`hub` は
+   Hugging Face(7 章と 10 章)に使う。GPU を使わない作業(テスト、変換、計画)だけなら、CI と同じ `uv pip install -e ".[dev]"`
    で足りる。`examples/` の script は `.venv/bin/geniac-baseline` を使うので、`.venv` を activate しなくてよい。
 
-3. ログインノードで、コンペの CaP-X を `geniac_prize_2026_baseline/geniac_prize_2026_code` に作る。`patches/geniac_prize/setup.sh` が
+3. コンペの CaP-X を `geniac_prize_2026_baseline/geniac_prize_2026_code` に作る。`patches/geniac_prize/setup.sh` が
    [geniac_prize_2026_code](https://github.com/matsuolab/geniac_prize_2026_code) を clone して決まった commit に合わせ、
    [setup.md](../setup.md) の patch を当て、submodule のうちベースラインで使う 7 つを取る。BEHAVIOR の
    シミュレータは評価の時に別のサーバーで動くので、ここでは入れない。clone は [3 章](03_clone.md)と同じく
@@ -66,11 +76,10 @@
    └── configs/  docs/  examples/  geniac_baseline/  tests/
    ```
 
-4. GPU 無しで計算ノードを確保し、CaP-X の venv を 3 つ作る。
+4. CaP-X の venv を 3 つ作る。
 
    ```bash
    cd <共用ストレージ>/<ユーザー名>/geniac_prize_2026_baseline/geniac_prize_2026_code
-   srun --partition=<パーティション> --cpus-per-task=16 --mem=64G --time=01:00:00 --pty bash
    uv python install 3.10 3.12
 
    # Robosuite: .venv(Python 3.10)。最後の python で Robosuite の設定ファイルを作る
@@ -92,11 +101,10 @@
    source .venv-serve/bin/activate
    uv pip install --no-config --torch-backend=cu130 vllm==0.26.0 "transformers>=5" huggingface_hub
    deactivate
-   exit
    ```
 
-5. ログインノードで、LIBERO-PRO の assets の場所を `~/.libero/config.yaml` に書く。このファイルが無いと、LIBERO は
-   最初の import で設定を対話的に聞いてくるので、ジョブが止まる。
+5. LIBERO-PRO の assets の場所を `~/.libero/config.yaml` に書く。このファイルが無いと、LIBERO は最初の import で
+   設定を対話的に聞いてくるので、ジョブが止まる。最後の `exit` で計算ノードから抜ける。
 
    ```bash
    cd <共用ストレージ>/<ユーザー名>/geniac_prize_2026_baseline/geniac_prize_2026_code
@@ -109,6 +117,14 @@
    datasets: $L/../datasets
    init_states: $L/init_files
    EOF
+   exit
+   ```
+
+   ログインノードに戻ったら、このシェルでも `uv` を使えるように PATH を通す。次のログインからは要らない。
+
+   ```bash
+   export PATH="$HOME/.local/bin:$PATH"
+   uv --version
    ```
 
 6. GPU を 1 枚確保し、4 つの環境のライブラリが読み込めることと、GPU が見えることを確かめる。

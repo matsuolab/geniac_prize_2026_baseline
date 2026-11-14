@@ -7,14 +7,12 @@
 
 1. W&B のアカウントを用意する。
 
-2. ログインノードで wandb を入れ、ログインする。`wandb login` が API key を聞いてくるので、W&B の User settings に
-   ある key を貼り付ける。
+2. ログインノードで W&B にログインする。wandb は [4 章](04_install.md)で `.venv` に入れてある。`wandb login` が
+   API key を聞いてくるので、W&B の User settings にある key を貼り付ける。
 
    ```bash
    cd <共用ストレージ>/<ユーザー名>/geniac_prize_2026_baseline
-   source .venv/bin/activate
-   uv pip install -e ".[wandb]"
-   wandb login
+   .venv/bin/wandb login
    ```
 
    key はホームディレクトリの `~/.netrc` に保存される。

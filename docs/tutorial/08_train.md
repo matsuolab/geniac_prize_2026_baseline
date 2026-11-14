@@ -4,8 +4,8 @@
 
 Qwen3.8-27B の LoRA adapter を、SFT、DMPO の順に学習する。
 
-この章のコマンドは、ログインノードの `<共用ストレージ>/<ユーザー名>/geniac_prize_2026_baseline` で、venv を有効にして
-(`source .venv/bin/activate`)実行する。
+この章のコマンドは `<共用ストレージ>/<ユーザー名>/geniac_prize_2026_baseline` で実行する。学習はジョブとして計算ノードで
+流す。
 
 ## 準備
 

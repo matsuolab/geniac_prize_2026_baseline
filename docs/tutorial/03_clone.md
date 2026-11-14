@@ -27,13 +27,14 @@ Slurmコマンドの使い方がわかったところで、早速ベースライ
 
    以降の章で使う認証情報も同様にホーム領域に置き、グループ領域で共有しないようにする。
 
-2. このベースラインリポジトリをclone する。
+2. GPU 無しで計算ノードを確保し、このベースラインリポジトリを clone する。
 
    ```bash
    mkdir -p <共用ストレージ>/<ユーザー名>
    cd <共用ストレージ>/<ユーザー名>
+   srun --partition=<パーティション> --cpus-per-task=1 --mem=2G --time=00:10:00 --pty bash
    git clone git@github.com:matsuolab/geniac_prize_2026_baseline.git
-   cd geniac_prize_2026_baseline
+   exit
    ```
 
    ここまでで、ディレクトリの構造が以下のようになる。

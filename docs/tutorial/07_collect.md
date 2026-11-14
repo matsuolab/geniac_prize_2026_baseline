@@ -32,23 +32,39 @@
 3. モデルの重みを用意する。Qwen3.8-27B(約 52 GB)と Molmo2-8B(約 33 GB)の snapshot を、計算ノードから見える場所に
    置く。チームの共用ストレージに既にあれば、それを `<モデルのスナップショット>` と `<Molmo2-8B のスナップショット>`
    として使う(チームのリーダーに聞く)。Qwen3.8-27B は revision `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` の物を使う。
-   snapshot が無ければ、ログインノードで取る。
+   snapshot が無ければ、計算ノードのジョブで取る。
 
    ```bash
+   cd <共用ストレージ>/<ユーザー名>
+   cat > download_models_job.sh <<'EOF'
+   #!/usr/bin/env bash
+   #SBATCH --job-name=download-models
+   #SBATCH --partition=<パーティション>
+   #SBATCH --cpus-per-task=8
+   #SBATCH --mem=32G
+   #SBATCH --time=<時間>
+   #SBATCH --output=<共用ストレージ>/<ユーザー名>/logs/%x-%j.out
+   set -euo pipefail
    cd <共用ストレージ>/<ユーザー名>
    geniac_prize_2026_baseline/.venv/bin/hf download Qwen/Qwen3.8-27B \
        --revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 --local-dir models/Qwen3.8-27B
    geniac_prize_2026_baseline/.venv/bin/hf download allenai/Molmo2-8B --local-dir models/Molmo2-8B
+   EOF
+   sbatch download_models_job.sh
    ```
+
+   ジョブが終わったら、ログ(`<共用ストレージ>/<ユーザー名>/logs/download-models-<jobid>.out`)にエラーが無いことを
+   確かめる。
 
    この場合は `<モデルのスナップショット>`、`<Molmo2-8B のスナップショット>`は`<共用ストレージ>/<ユーザー名>/models/Qwen3.8-27B` 、 `.../models/Molmo2-8B` となる。
 
-4. ベースラインの chat template を作る([installation.md](../installation.md) の Model weights)。最後に sha256 が
+4. 計算ノードで、ベースラインの chat template を作る([installation.md](../installation.md) の Model weights)。最後に sha256 が
    表示され、ベースラインの物と違えばエラーで止まる。
 
    ```bash
    cd <共用ストレージ>/<ユーザー名>/geniac_prize_2026_baseline
-   .venv/bin/geniac-baseline template --model-dir <モデルのスナップショット> --out runs/qwen38_low_reasoning.jinja
+   srun --partition=<パーティション> --cpus-per-task=2 --mem=8G --time=00:10:00 \
+       .venv/bin/geniac-baseline template --model-dir <モデルのスナップショット> --out runs/qwen38_low_reasoning.jinja
    ```
 
 ## run spec を作る
