@@ -35,7 +35,11 @@ launch_script: aspire/sim/cap/envs/launch.py
 pythonpath: <ASPIRE root>
 sim_python: <geniac_prize_2026_code root>/.venv-libero/bin/python    # Robosuite は .venv/bin/python
 serve_python: <geniac_prize_2026_code root>/.venv-serve/bin/python
+unix_sockets: false    # ASPIRE の tree はソケットに対応していない
 ```
+
+`unix_sockets: false` では、サーバーが `127.0.0.1` のポートで立ち、同じノードの他のユーザーも接続できる
+([setup.md](setup.md) の Unix sockets)。他のユーザーがいるノードでは使わない。
 
 ベースラインの数字は次の venv で測った。
 

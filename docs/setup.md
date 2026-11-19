@@ -34,6 +34,8 @@ venv の作り方は [installation.md](installation.md) にある。
 
 固定する commit は `patches/geniac_prize/setup.sh` の `commit=` の 1 行だけに書いてある。commit を変える時はこの行を変え、
 `setup.sh` を実行して patch が当たることを確かめる。
+固定する commit が変わった後は、前の commit で作った tree は使えない(タスクの config の形やサーバーの立て方が違う)。
+新しいディレクトリに `setup.sh` で作り直し、venv も [installation.md](installation.md) の手順で作り直す。
 
 ### Setting
 
@@ -50,9 +52,64 @@ trial の実時間上限は run spec の `trial_timeout_s`(既定 2400 s、ベ�
 | # | fix | 対象 | env var | why |
 | --- | --- | --- | --- | --- |
 | 1 | VDM テキストを turn ごとに `differencing_feedback_XX.txt` として trial フォルダに保存する | `capx/envs/trial.py` の `_handle_multi_turn_step` と `_run_single_trial`、`capx/utils/launch_utils.py` の `_save_trial_artifacts` | なし | `convert rows` が FINISH の prompt を再構成するのに要る([data_format.md](data_format.md))。ファイル名と番号は ASPIRE 版と同じ |
-| 2 | trial の実時間上限を env var で変える。reset 後の再設定(`capx/envs/trial.py:783-786`)も同じ値を使う | `capx/envs/runner.py:36` | `CAPX_TRIAL_TIMEOUT_S`(既定 1000) | 長い trial が途中で打ち切られる。retry の回数は変えない |
-| 3 | perception サーバーの URL を env var から読む | `capx/integrations/vision/sam3.py:20`、`sam2.py:17`、`owlvit.py:16`、`capx/integrations/motion/pyroki.py:12`、`curobo.py:10` | `SAM3_SERVICE_URL`、`SAM2_SERVICE_URL`、`OWLVIT_SERVICE_URL`、`PYROKI_SERVICE_URL`、`CUROBO_SERVICE_URL` | 1 台で複数の run を並べる時にポートを動かせない。GraspNet と Molmo は元から env var を読む |
-| 4 | 外部の LIBERO checkout を読み込む。`libero.libero` の構成の package も読める | `capx/integrations/libero/__init__.py:89-95` | `CAPX_LIBERO_ROOT` | 同梱の LIBERO-PRO だけを探し、`from libero import benchmark` の構成しか読めない |
+| 2 | trial の実時間上限を env var で変える。reset 後の再設定(`capx/envs/trial.py:783-786`)も同じ値を使う | `capx/envs/runner.py:38` | `CAPX_TRIAL_TIMEOUT_S`(既定 1000) | 長い trial が途中で打ち切られる。retry の回数は変えない |
+| 3 | 外部の LIBERO checkout を読み込む。`libero.libero` の構成の package も読める | `capx/integrations/libero/__init__.py:89-95` | `CAPX_LIBERO_ROOT` | 同梱の LIBERO-PRO だけを探し、`from libero import benchmark` の構成しか読めない |
+
+### Unix sockets
+
+計算ノードは他のチームと共有していて、`127.0.0.1` のポートで待ち受けるサーバーには、同じノードの他のユーザーも接続できる
+([tutorial の 2 章](tutorial/02_slurm.md#ノードを他のチームと共有する))。固定する commit のコンペの CaP-X は、手元の
+サーバーを TCP のポートでは立てず、Unix ドメインソケット(ソケットファイル)だけで立てる(`capx/utils/unix_http.py`)。
+
+- サーバー(SAM3、SAM2、Contact-GraspNet、PyRoKi、cuRobo、OWL-ViT、LLM のプロキシ)は、ソケットを置くディレクトリの中の
+  `<名前>.sock` で待ち受ける。ソケットは所有者だけが使える(`600`)。
+- クライアントは、サーバーを `http+unix://<名前>.sock/<path>` で指す。`http://` の URL はエラーになる(手元でない API は
+  `https://`)。
+- タスクの config の `api_servers` は、`host` と `port` の代わりに `socket: <名前>.sock` を書く。`host` や `port` を書くと
+  エラーになる。`configs/capx/geniac_prize/` の config はこの形にしてある。
+
+ソケットを置くディレクトリは、環境変数 `CAPX_SOCKET_DIR` で決まる(指定が無ければ `~/.capx/sockets`)。他のユーザーが
+入れるディレクトリ(権限が `700` でない、自分の物でない)は、エラーで止まる。
+
+`run.sh` は実行のたびに `mktemp -d /tmp/capx.XXXXXXXX`(権限 `700`)でディレクトリを作り、`CAPX_SOCKET_DIR` として
+export して、終了時にディレクトリごと消す。ディレクトリに入れるのは自分だけなので、他のユーザーはソケットに接続できない。
+ソケットは実行ごとに別なので、同じノードで複数の実行を並べても重ならない。ポートが無いので、run spec の `port_offset` と
+`vllm_port_offset` は 0 のままにする(0 以外は点検で止まる)。
+
+| サーバー | ソケット | 指す URL |
+| --- | --- | --- |
+| Qwen(収集: コード生成と VDM) | `qwen.sock` | `http+unix://qwen.sock/v1/chat/completions` |
+| Qwen(評価: VDM) | `vdm.sock` | `http+unix://vdm.sock/v1/chat/completions` |
+| Qwen(評価: コード生成) | `code.sock` | `http+unix://code.sock/v1/chat/completions` |
+| Molmo | `molmo.sock` | `http+unix://molmo.sock/v1`(`CAPX_MOLMO_URL`) |
+| SAM3、Contact-GraspNet、PyRoKi など | `sam3.sock`、`graspnet.sock`、`pyroki.sock` など | コンペの CaP-X のクライアントの既定 |
+
+vLLM は `--uds $CAPX_SOCKET_DIR/<名前>.sock` で立てる。実行中のサーバーには、`run.sh` のログに出るディレクトリを使って
+次のように問い合わせられる(`http://127.0.0.1` は HTTP のリクエストに書くだけの物で、接続にはソケットを使う)。
+
+```bash
+curl --unix-socket /tmp/capx.XXXXXXXX/qwen.sock http://127.0.0.1/v1/models
+```
+
+`skill-library.patch` が足す `point_at_object` は、VLM への問い合わせ(`CAPX_VLM_URL`)を、ソケットに送れるクライアント
+(`capx/utils/unix_http_client.py`)で送る。ASPIRE の patch が足した行との違いは、この 1 か所だけである。
+
+vLLM のエンジンのプロセスは、`--uds` で立てても TCP のポートをいくつか開ける(vLLM 0.26.0 と B300 で、サーバー 1 つに
+つき 7 個)。PyTorch の分散処理の初期化(`torch.distributed` の TCPStore と Gloo)が開ける物で、推論の API はそこには無く、
+ソケットだけにある。`VLLM_HOST_IP=127.0.0.1` を付けても、開ける場所は変わらない。
+
+このポートに同じノードの他のユーザーが接続できないように、`run.sh` は vLLM を、ネットワークを切り離した名前空間
+(`unshare -r -n`)の中で起動する。ポートはその名前空間の中にだけ開き、ノードからは見えない。ソケットはファイルなので、
+名前空間の外のクライアントからそのまま使える。次の 2 つの場合は名前空間を使わずに起動し、`run.sh` のログに
+`WARNING` を出す(API はどちらの場合もソケットだけにある)。
+
+- 重みを Hub の ID で指定している(`model_path` や `molmo_path` が `null`)。名前空間の中にはネットワークが無く、
+  ダウンロードできないためである。ローカルの snapshot を指定すれば、名前空間の中で起動する。
+- ノードが名前空間を作らせない(`unshare -r -n` が失敗する)。
+
+run spec の `unix_sockets: false` は、`127.0.0.1` のポートで立てる。ASPIRE の tree
+([reproduce_baseline.md](reproduce_baseline.md))はソケットに対応していないので、この設定が要る。他のユーザーがいる
+ノードでは使わない。コンペの CaP-X の tree では使えない(点検で止まる)。
 
 ### Skill library
 
@@ -60,9 +117,9 @@ trial の実時間上限は run spec の `trial_timeout_s`(既定 2400 s、ベ�
 `FrankaLiberoApiReducedSkillLibrary` に、ASPIRE の patch(`patches/aspire/`)が足した skill 14 個をそのまま足す。
 ベースラインの LIBERO-PRO のデータはこれらを呼ぶので、無い tree では学習したモデルのコードがその場で失敗する。
 
-- 2 つの tree の元のファイルは、ASPIRE の license header と module の path を除いて同じである。足す行も ASPIRE の
-  patch と 1 行ずつ同じで(`tests/test_patches.py` で確認)、patch 後のファイルは ASPIRE の物
-  (sha256 `a5bda54c…`、[reproduce_baseline.md](reproduce_baseline.md))から header を除き path を `capx.` にした物と一致する。
+- 2 つの tree の元のファイルは、ASPIRE の license header と module の path を除いて同じである。足す行も、
+  `point_at_object` の VLM への問い合わせをソケットに送る 1 か所([Unix sockets](#unix-sockets))を除いて、ASPIRE の
+  patch と 1 行ずつ同じである(`tests/test_patches.py` で確認)。
 - Robosuite の skill library(`control_reduced_skill_library.py`)は 2 つの tree で元から同じなので、変えない。
 - `point_at_object` は `CAPX_VLM_URL` と `CAPX_VLM_MODEL` の VLM に物の位置を聞く。片方でも無ければ VLM は使わず、
   SAM3 の text prompt で探す。収集と評価の script は、Qwen の VDM サーバーをこの 2 つに入れる。

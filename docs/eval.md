@@ -28,11 +28,14 @@ spec の相対 path の基準は [collect.md](collect.md#run-spec-paths) の表�
 | API | LIBERO 用の追加 skill 14 個を含む skill library(ASPIRE、またはコンペの CaP-X + `skill-library.patch`) | コンペの CaP-X の skill library |
 | code writer | thinking なし(学習データと同じ形) | サーバーの既定(Qwen3.8 は thinking あり) |
 
+サーバーは TCP のポートではなく、`$CAPX_SOCKET_DIR/<名前>.sock` で待ち受ける([setup.md](setup.md) の Unix sockets)。
+表の括弧はソケットの名前である(`unix_sockets: false` の ASPIRE の tree では、順にポート 8110、8111、8122)。
+
 | Server | Settings |
 | --- | --- |
-| VDM(port 8110) | 収集時と同じ(thinking あり、`--reasoning-parser qwen3`)。gpu-memory-utilization 0.30 |
-| コード生成(port 8111) | 同じモデルで thinking なし(`--default-chat-template-kwargs {"enable_thinking": false}`)、reasoning parser なし。gpu-memory-utilization 0.30。adapter を指定すると `--enable-lora --max-lora-rank <adapter の r> --max-loras 1 --lora-modules <lora_name>=<adapter>` を付ける |
-| Molmo(port 8122) | 収集時と同じ |
+| VDM(`vdm.sock`) | 収集時と同じ(thinking あり、`--reasoning-parser qwen3`)。gpu-memory-utilization 0.30 |
+| コード生成(`code.sock`) | 同じモデルで thinking なし(`--default-chat-template-kwargs {"enable_thinking": false}`)、reasoning parser なし。gpu-memory-utilization 0.30。adapter を指定すると `--enable-lora --max-lora-rank <adapter の r> --max-loras 1 --lora-modules <lora_name>=<adapter>` を付ける |
+| Molmo(`molmo.sock`) | 収集時と同じ |
 
 ## Scoring
 

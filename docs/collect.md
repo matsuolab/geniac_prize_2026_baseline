@@ -56,7 +56,9 @@ run spec の相対 path は、key によって基準が違う。
 | タスクの config に `save_multiturn_prompts: true` が無い | 判断プロンプトが保存されず、学習データにならない |
 | seed が 301-400 の外、または LIBERO-PRO の seed が評価用 layout(40-49)にあたる | 評価用の seed と layout を学習データに入れない |
 | LIBERO-PRO のタスクに `layouts` が無い | seed の layout が決まらない |
-| config のポートが CaP-X のクライアントの既定値と合わない、または `port_offset` を checkout が扱えない | クライアントが別のサーバーに接続する |
+| config の `api_servers` に `host` や `port` がある、または `socket` がクライアントの送り先と違う | コンペの CaP-X は `host` と `port` を受け付けない。名前が違うと、クライアントがサーバーを見つけられない |
+| `port_offset` や `vllm_port_offset` が 0 でない | ソケットで立てるサーバーにはポートが無い。実行ごとにディレクトリが別なので、ずらす必要も無い |
+| checkout に `utils/unix_http.py` が無い(ASPIRE の tree は `unix_sockets: false` で解除) | サーバーが TCP のポートで立ち、同じノードの他のユーザーが接続できる([setup.md](setup.md) の Unix sockets) |
 | `chat_template` が無い(`allow_stock_chat_template: true` で解除) | ベースラインと異なるテンプレートで動く |
 
 ## LIBERO-PRO layouts
@@ -92,6 +94,7 @@ print(len(L('libero_object_swap', 0).init_states))"
 | pointing model | allenai/Molmo2-8B(bf16、max-model-len 16384、gpu-memory-utilization 0.28) | ours |
 | trial の実時間上限 | 2400 s(`trial_timeout_s`)。ASPIRE の既定値 | run |
 | 画像 | LIBERO-PRO 800×512、Robosuite 512×512(ベースラインの trial の保存画像で確認) | run |
+| サーバーの待ち受け | TCP のポートではなく、実行ごとに作るディレクトリのソケット(`unix_sockets: true`、[setup.md](setup.md) の Unix sockets) | ours |
 | B300 用の設定 | `b300_workarounds: true` で `--attention-backend TRITON_ATTN --mm-encoder-attn-backend TORCH_SDPA`、`TORCH_CUDA_ARCH_LIST=10.0`。既定は off | run |
 
 GPU の割り当ては run spec の `qwen_gpu_util`、`molmo_gpu_util`、`max_model_len`、`tensor_parallel_size` で変える。
