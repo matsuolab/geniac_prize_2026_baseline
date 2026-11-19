@@ -1,8 +1,8 @@
 diff --git a/capx/envs/runner.py b/capx/envs/runner.py
-index 234c97e..df01f8f 100644
+index 5d98bcd..b8544f5 100644
 --- a/capx/envs/runner.py
 +++ b/capx/envs/runner.py
-@@ -33,7 +33,7 @@ from capx.utils.parallel_eval import run_parallel_with_setup
+@@ -35,7 +35,7 @@ from capx.utils.unix_http import is_listening, resolve_socket
  # Constants
  # ---------------------------------------------------------------------------
  
@@ -93,112 +93,8 @@ index c322c2a..970c0d0 100644
      except Exception as e:  # pragma: no cover - optional dependency
          raise ModuleNotFoundError(
              "LIBERO not available; add submodule or run `uv sync --extra libero`."
-diff --git a/capx/integrations/motion/curobo.py b/capx/integrations/motion/curobo.py
-index 4326ca6..d059a95 100644
---- a/capx/integrations/motion/curobo.py
-+++ b/capx/integrations/motion/curobo.py
-@@ -1,5 +1,6 @@
- from __future__ import annotations
- 
-+import os
- from collections.abc import Callable
- from typing import Any
- 
-@@ -7,7 +8,7 @@ import numpy as np
- 
- from capx.utils.serve_utils import post_with_retries
- 
--DEFAULT_URL = "http://127.0.0.1:8117"
-+DEFAULT_URL = os.environ.get("CUROBO_SERVICE_URL", "http://127.0.0.1:8117")
- 
- 
- def init_curobo(
-diff --git a/capx/integrations/motion/pyroki.py b/capx/integrations/motion/pyroki.py
-index 28e6722..d27a548 100644
---- a/capx/integrations/motion/pyroki.py
-+++ b/capx/integrations/motion/pyroki.py
-@@ -1,5 +1,7 @@
- from __future__ import annotations
- 
-+import os
-+
- from collections.abc import Callable
- from typing import Any
- 
-@@ -9,7 +11,7 @@ from scipy.spatial.transform import Rotation as SciRotation
- 
- from capx.utils.serve_utils import post_with_retries
- 
--DEFAULT_URL = "http://127.0.0.1:8116"
-+DEFAULT_URL = os.environ.get("PYROKI_SERVICE_URL", "http://127.0.0.1:8116")
- 
- 
- def init_pyroki(
-diff --git a/capx/integrations/vision/owlvit.py b/capx/integrations/vision/owlvit.py
-index 6cfc12a..156b883 100644
---- a/capx/integrations/vision/owlvit.py
-+++ b/capx/integrations/vision/owlvit.py
-@@ -1,5 +1,7 @@
- from __future__ import annotations
- 
-+import os
-+
- import base64
- import io
- from typing import Any
-@@ -13,7 +15,7 @@ from capx.utils.serve_utils import post_with_retries
- """OWL-ViT integration via FastAPI service."""
- 
- # Configuration
--SERVICE_URL = "http://127.0.0.1:8117"
-+SERVICE_URL = os.environ.get("OWLVIT_SERVICE_URL", "http://127.0.0.1:8117")
- 
- 
- def _encode_image(image: np.ndarray | Image.Image) -> str:
-diff --git a/capx/integrations/vision/sam2.py b/capx/integrations/vision/sam2.py
-index a0bff31..3148a76 100644
---- a/capx/integrations/vision/sam2.py
-+++ b/capx/integrations/vision/sam2.py
-@@ -1,5 +1,7 @@
- from __future__ import annotations
- 
-+import os
-+
- import base64
- import io
- from collections.abc import Sequence
-@@ -14,7 +16,7 @@ from capx.utils.serve_utils import post_with_retries
- """SAM 2 integration via FastAPI service."""
- 
- # Configuration
--SERVICE_URL = "http://127.0.0.1:8113"
-+SERVICE_URL = os.environ.get("SAM2_SERVICE_URL", "http://127.0.0.1:8113")
- 
- 
- def _encode_image(image: np.ndarray | Image.Image) -> str:
-diff --git a/capx/integrations/vision/sam3.py b/capx/integrations/vision/sam3.py
-index 774f60d..6d9f858 100644
---- a/capx/integrations/vision/sam3.py
-+++ b/capx/integrations/vision/sam3.py
-@@ -1,5 +1,7 @@
- from __future__ import annotations
- 
-+import os
-+
- import base64
- import io
- import pathlib
-@@ -17,7 +19,7 @@ from capx.utils.serve_utils import post_with_retries
- """SAM 3 integration via FastAPI service."""
- 
- # Configuration
--SERVICE_URL = "http://127.0.0.1:8114"
-+SERVICE_URL = os.environ.get("SAM3_SERVICE_URL", "http://127.0.0.1:8114")
- 
- 
- def _encode_image(image: np.ndarray | Image.Image) -> str:
 diff --git a/capx/utils/launch_utils.py b/capx/utils/launch_utils.py
-index 43dc466..3a3cce3 100644
+index d8e1e22..4a551dd 100644
 --- a/capx/utils/launch_utils.py
 +++ b/capx/utils/launch_utils.py
 @@ -286,6 +286,7 @@ def _save_trial_artifacts(

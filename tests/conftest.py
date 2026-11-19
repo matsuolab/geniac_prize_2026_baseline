@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,23 @@ VDM_HEADER = "Included below is the observed differences between the current sta
 TAIL = "\nBased on the code output, decide.\n"
 SYSTEM = "You are a helpful assistant."
 PREFIX = "You are controlling a robot. Goal: lift the cube.\n"
+
+
+def ports_to_sockets(text: str) -> str:
+    """``api_servers`` entries for geniac_prize_2026_code: ``socket: <name>.sock`` for ``port:``, no ``host:``."""
+    from geniac_baseline.collect.settings import PERCEPTION_SOCKETS
+
+    out, target = [], ""
+    for line in text.split("\n"):
+        if m := re.match(r"\s*-?\s*_target_:\s*(\S+)", line):
+            target = m.group(1)
+        if re.match(r"\s+host:\s*\S+\s*$", line):
+            continue
+        if m := re.match(r"(\s+)port:\s*\d+\s*$", line):
+            (name,) = [v for k, v in PERCEPTION_SOCKETS.items() if k in target]
+            line = f"{m.group(1)}socket: {name}"
+        out.append(line)
+    return "\n".join(out)
 
 
 def config_text(template: str = TEMPLATE) -> str:

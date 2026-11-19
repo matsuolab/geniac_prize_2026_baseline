@@ -29,6 +29,7 @@ from typing import Any
 
 import yaml
 
+from geniac_baseline.collect import settings as S
 from geniac_baseline.data.split import (
     DEFAULT_RULES,
     LayoutError,
@@ -140,6 +141,49 @@ def check_skill_library(pkg: Path, config: dict[str, Any], path: Path) -> None:
             "the baseline's LIBERO code calls them. Build the tree with bash patches/geniac_prize/setup.sh "
             "(docs/setup.md)."
         )
+
+
+def socket_only(pkg: Path) -> bool:
+    """Whether this checkout's servers listen only on Unix sockets (geniac_prize_2026_code since 4ea0b16)."""
+    return (pkg / "utils" / "unix_http.py").is_file()
+
+
+def check_unix_sockets(pkg: Path, unix_sockets: bool, port_offset: int, vllm_port_offset: int) -> None:
+    """``unix_sockets`` has to match what the checkout's servers and clients do."""
+    if unix_sockets and not socket_only(pkg):
+        raise PreflightError(
+            f"{pkg} has no utils/unix_http.py, so its servers would listen on TCP ports of the node, where "
+            "other users can connect to them. Build the tree with bash patches/geniac_prize/setup.sh "
+            "(docs/setup.md). To run on TCP ports knowingly (the ASPIRE tree, on a machine nobody else uses), "
+            "set unix_sockets: false."
+        )
+    if not unix_sockets and socket_only(pkg):
+        raise PreflightError(
+            f"the servers and clients of {pkg} only use Unix sockets (utils/unix_http.py refuses http:// URLs); "
+            "set unix_sockets: true."
+        )
+    if unix_sockets and (port_offset or vllm_port_offset):
+        raise PreflightError(
+            "port_offset and vllm_port_offset move TCP ports, and with unix_sockets no server has one: every run "
+            "gets its own socket directory, so runs on one node do not collide. Set both to 0."
+        )
+
+
+def check_api_server_sockets(config: dict[str, Any], path: Path) -> None:
+    """Each perception server has to listen on the socket its client sends to."""
+    for srv in config.get("api_servers") or []:
+        target = str(srv.get("_target_", ""))
+        tcp = sorted({"host", "port"} & set(srv))
+        if tcp:
+            raise PreflightError(
+                f"{path}: api_servers entry {target} sets {' and '.join(tcp)}, which the checkout refuses; "
+                "replace them with `socket: <name>.sock` (configs/capx/geniac_prize/ has such configs)"
+            )
+        for key, name in S.PERCEPTION_SOCKETS.items():
+            if key in target and srv.get("socket") != name:
+                raise PreflightError(
+                    f"{path}: {target} listens on socket {srv.get('socket')!r}, but its client sends to {name}"
+                )
 
 
 # launcher -> (client module, URL variable, default port of that client in capx/integrations/*)

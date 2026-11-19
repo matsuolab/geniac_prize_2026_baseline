@@ -18,6 +18,7 @@ Run spec (``configs/collect.yaml``, ``configs/eval_base.yaml``)::
     molmo_path: null                          # local Molmo2-8B weights (default: the model id); molmo: false to skip
     chat_template: <path to the low-effort Qwen3.8 chat template>
     output_dir: runs/<name>
+    unix_sockets: true                        # servers on socket files, not TCP ports (false: the ASPIRE tree)
     tasks:
       - {task: cube_lifting, config: <CaP-X config used for this task>, seeds: ["301-400"]}
     # eval only
@@ -40,11 +41,13 @@ import yaml
 from geniac_baseline.collect import settings as S
 from geniac_baseline.collect.preflight import (
     PreflightError,
+    check_api_server_sockets,
     check_collect_config,
     check_patched,
     check_port_env,
     check_seeds,
     check_skill_library,
+    check_unix_sockets,
     check_visual_models,
     load_yaml,
     package_dir,
@@ -79,6 +82,10 @@ class RunSpec:
     allow_stock_chat_template: bool = False
     port_offset: int = 0
     vllm_port_offset: int = 0
+    # true = no server takes requests on a TCP port; each listens on a socket file in a directory only this user
+    # can enter (settings.SOCKET_DIR). geniac_prize_2026_code only works this way. false = 127.0.0.1 ports, which
+    # every user of the node can connect to (the ASPIRE tree).
+    unix_sockets: bool = True
     b300_workarounds: bool = False
     # wall-clock limit per trial, exported as CAPX_TRIAL_TIMEOUT_S (geniac_prize) and ASPIRE_TRIAL_TIMEOUT_S (ASPIRE);
     # 2400 s = the ASPIRE default the baseline ran with
@@ -162,6 +169,14 @@ def _ports(spec: RunSpec) -> dict[str, int]:
     return {"llm": S.LLM_PORT + off, "code": S.CODE_PORT + off, "molmo": S.MOLMO_PORT + off}
 
 
+def _urls(spec: RunSpec) -> dict[str, str]:
+    """Base URL of each vLLM server, by the same keys as ``_ports``."""
+    if spec.unix_sockets:
+        names = {"llm": "qwen" if spec.mode == "collect" else "vdm", "code": "code", "molmo": "molmo"}
+        return {k: S.unix_url(n) for k, n in names.items()}
+    return {k: f"http://127.0.0.1:{p}" for k, p in _ports(spec).items()}
+
+
 def servers(spec: RunSpec) -> tuple[list[S.VllmServer], str, str]:
     """Servers to start (in this order), and the launch's code-model name and server port key."""
     ports = _ports(spec)
@@ -225,6 +240,8 @@ def servers(spec: RunSpec) -> tuple[list[S.VllmServer], str, str]:
                 gpu_util=spec.molmo_gpu_util,
             )
         )
+    for s in srv:
+        s.unix_socket = spec.unix_sockets
     return srv, code_model, code_port
 
 
@@ -257,6 +274,7 @@ def preflight(spec: RunSpec) -> Path:
     if spec.mode == "collect" and spec.adapter is not None:
         raise PreflightError("collection runs the base model; adapter is an eval setting")
     check_patched(pkg, spec.mode)
+    check_unix_sockets(pkg, spec.unix_sockets, spec.port_offset, spec.vllm_port_offset)
     _, code_model, _ = servers(spec)
     for t in spec.tasks:
         cfg = load_yaml(t.config)
@@ -264,7 +282,10 @@ def preflight(spec: RunSpec) -> Path:
             check_collect_config(cfg, t.config)
         check_visual_models(pkg, cfg, code_model=code_model, vdm_model=spec.model)
         check_skill_library(pkg, cfg, t.config)
-        check_port_env(pkg, cfg, spec.port_offset, molmo_port_moved=spec.molmo and spec.vllm_port_offset != 0)
+        if spec.unix_sockets:
+            check_api_server_sockets(cfg, t.config)
+        else:
+            check_port_env(pkg, cfg, spec.port_offset, molmo_port_moved=spec.molmo and spec.vllm_port_offset != 0)
     _segments(spec)
     return pkg
 
@@ -280,7 +301,7 @@ def write_plan(spec: RunSpec) -> Path:
     if out.exists():
         raise FileExistsError(f"refusing to overwrite {out}")
     srv, code_model, code_port = servers(spec)
-    ports = _ports(spec)
+    urls = _urls(spec)
     segs = _segments(spec)
     out.mkdir(parents=True)
     model_slug = code_model.replace("/", "_")  # capx/envs/runner.py _setup_output_dir inserts it
@@ -298,27 +319,57 @@ def write_plan(spec: RunSpec) -> Path:
     env = {**S.RUN_ENV, **(S.B300_ENV if spec.b300_workarounds else {})}
     # endpoint of the VLM some APIs query themselves (ASPIRE's LIBERO skill-library API reads
     # CAPX_VLM_URL / CAPX_VLM_MODEL; capx/utils/eval_utils.py reads LLM_BASE_URL). Points at the Qwen VDM server.
-    env["LLM_BASE_URL"] = f"http://127.0.0.1:{ports['llm']}/"
-    env["CAPX_VLM_URL"] = f"http://127.0.0.1:{ports['llm']}/v1"
+    env["LLM_BASE_URL"] = f"{urls['llm']}/"
+    env["CAPX_VLM_URL"] = f"{urls['llm']}/v1"
     env["CAPX_VLM_MODEL"] = spec.model
     env["CAPX_TRIAL_TIMEOUT_S"] = str(spec.trial_timeout_s)
     env["ASPIRE_TRIAL_TIMEOUT_S"] = str(spec.trial_timeout_s)
     env.update(spec.extra_env)
     if spec.molmo:
-        env["CAPX_MOLMO_URL"] = f"http://127.0.0.1:{ports['molmo']}/v1"  # read by both trees' molmo.py
+        env["CAPX_MOLMO_URL"] = f"{urls['molmo']}/v1"  # read by both trees' molmo.py
         env["CAPX_MOLMO_MODEL"] = S.MOLMO_MODEL
     if spec.port_offset:
         for name, port in zip(("SAM2", "SAM3", "GRASPNET", "PYROKI", "OWLVIT"), S.PERCEPTION_PORTS, strict=True):
             env[f"{name}_SERVICE_URL"] = f"http://127.0.0.1:{port + spec.port_offset}"
     lines += [f"export {k}={_q(v)}" for k, v in env.items()]
+    if spec.unix_sockets:
+        # /tmp: node-local and short (a socket path holds about 100 bytes); mktemp -d makes the directory mode 700
+        lines += [
+            "",
+            "# No server takes requests on a TCP port: each listens on a socket file in a directory only this user",
+            "# can enter; the clients reach http+unix://<name>.sock at <dir>/<name>.sock (capx/utils/unix_http.py).",
+            'CAPX_SOCKET_DIR="$(mktemp -d /tmp/capx.XXXXXXXX)" || exit 1',
+            "export CAPX_SOCKET_DIR",
+            "# vLLM's engine opens TCP ports for its own processes even with --uds. In a network namespace of its",
+            "# own they exist only there, so nobody on the node can connect to them; the socket file is unaffected.",
+            "# The namespace has no network, so only a server whose weights are a local directory starts in one.",
+            "if unshare -r -n sh -c 'ip link set lo up' 2>/dev/null; then",
+            "  ISOLATE=(env HF_HUB_OFFLINE=1 VLLM_NO_USAGE_STATS=1"
+            " unshare -r -n sh -c 'ip link set lo up; exec \"$@\"' sh)",
+            "else",
+            "  ISOLATE=()",
+            '  echo "[run] WARNING: cannot make a network namespace here (unshare -r -n): the vLLM engines\' internal"',
+            '  echo "[run] WARNING: TCP ports stay reachable from this node. The model API is on the socket only."',
+            "fi",
+        ]
+        health = 'curl -sf --unix-socket "$CAPX_SOCKET_DIR/$3.sock" http://127.0.0.1/health'
+        rm_sockets = ' rm -rf "$CAPX_SOCKET_DIR";'
+    else:
+        lines += [
+            "",
+            'echo "[run] WARNING: unix_sockets is false: the servers listen on TCP ports of $(hostname),'
+            ' and every user of this node can connect to them"',
+        ]
+        health = 'curl -sf "http://127.0.0.1:$3/health"'
+        rm_sockets = ""
     lines += [
         "",
         "PIDS=()",
         'cleanup() { for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done; sleep 5;'
-        ' for p in "${PIDS[@]}"; do kill -9 "$p" 2>/dev/null; done; }',
+        ' for p in "${PIDS[@]}"; do kill -9 "$p" 2>/dev/null; done;' + rm_sockets + " }",
         "trap cleanup EXIT",
-        "wait_up() {  # name pid port log -- poll /health every 10 s, up to 30 min",
-        '  for i in $(seq 1 180); do curl -sf "http://127.0.0.1:$3/health" >/dev/null 2>&1 &&'
+        "wait_up() {  # name pid socket-name-or-port log -- poll /health every 10 s, up to 30 min",
+        "  for i in $(seq 1 180); do " + health + " >/dev/null 2>&1 &&"
         ' { echo "[run] $1 ready after $((i*10))s"; return 0; };',
         '    kill -0 "$2" 2>/dev/null || { echo "[run] FATAL: $1 died"; tail -40 "$4"; return 1; }; sleep 10; done;',
         '  echo "[run] FATAL: $1 never became ready"; tail -40 "$4"; return 1; }',
@@ -326,11 +377,23 @@ def write_plan(spec: RunSpec) -> Path:
     ]
     for s in srv:  # one at a time
         log = out / f"vllm_{s.name}.log"
+        where = f"{S.SOCKET_DIR}/{s.name}.sock" if spec.unix_sockets else f":{s.port}"
+        serve = '"$SERVE_PY" ' + " ".join(S.shell_arg(x) for x in s.argv("python")[1:])
+        if spec.unix_sockets:  # vLLM creates the socket file with the process umask: keep it owner-only
+            if Path(s.model).is_absolute():
+                serve = f'( umask 077; exec ${{ISOLATE[@]+"${{ISOLATE[@]}}"}} {serve} )'
+            else:  # the weights come from the Hub, which a namespace without a network cannot reach
+                serve = f"( umask 077; exec {serve} )"
+                lines.append(
+                    f"echo \"[run] WARNING: {s.name} loads {s.model} from the Hub, so it keeps the node's network and"
+                    " its engine's internal TCP ports stay reachable from this node; give a local snapshot"
+                    ' (model_path, molmo_path) to close them"'
+                )
         lines += [
-            f"echo '[run] starting {s.name} on :{s.port}'",
-            '"$SERVE_PY" ' + " ".join(_q(x) for x in s.argv("python")[1:]) + f" > {_q(log)} 2>&1 &",
+            f'echo "[run] starting {s.name} on {where}"',
+            f"{serve} > {_q(log)} 2>&1 &",
             "PIDS+=($!)",
-            f'wait_up {s.name} "${{PIDS[-1]}}" {s.port} {_q(log)} || exit 1',
+            f'wait_up {s.name} "${{PIDS[-1]}}" {s.name if spec.unix_sockets else s.port} {_q(log)} || exit 1',
             "",
         ]
     launch = spec.capx_root / spec.launch_script
@@ -348,7 +411,7 @@ def write_plan(spec: RunSpec) -> Path:
             "--model",
             code_model,
             "--server-url",
-            f"http://127.0.0.1:{ports[code_port]}/v1/chat/completions",
+            f"{urls[code_port]}/v1/chat/completions",
             "--temperature",
             spec.temperature,
             "--reasoning-effort",
@@ -358,7 +421,7 @@ def write_plan(spec: RunSpec) -> Path:
             "--visual-differencing-model",
             spec.model,
             "--visual-differencing-model-server-url",
-            f"http://127.0.0.1:{ports['llm']}/v1/chat/completions",
+            f"{urls['llm']}/v1/chat/completions",
             "--output-dir",
             seg / "outputs" / t.task,
         ]

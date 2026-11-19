@@ -21,8 +21,9 @@ molmo_path: null
 chat_template: ../runs/qwen38_low_reasoning.jinja   # geniac-baseline template --model-dir <snapshot> --out <this path>
 
 output_dir: ../runs/collect_libero
-port_offset: 0            # perception servers (*_SERVICE_URL); 0 = CaP-X default ports
-vllm_port_offset: 0
+unix_sockets: true        # servers on socket files, not TCP ports (docs/setup.md); the ASPIRE tree needs false
+port_offset: 0            # only with unix_sockets: false: moves the perception servers' TCP ports
+vllm_port_offset: 0       # only with unix_sockets: false: moves the vLLM servers' TCP ports
 b300_workarounds: false   # true on B300: attention-kernel flags + TORCH_CUDA_ARCH_LIST=10.0
 num_workers: null         # null = the config's num_workers (8)
 trial_timeout_s: 2400     # per trial wall clock (ASPIRE default the baseline ran with)

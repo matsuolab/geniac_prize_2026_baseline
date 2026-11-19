@@ -16,18 +16,25 @@ from geniac_baseline.collect.run_config import RunConfigError, rewrite_config_te
 from geniac_baseline.data.prompts import yaml_template
 from geniac_baseline.eval.score import score_runs
 
-from .conftest import REAL, make_trial
+from .conftest import REAL, make_trial, ports_to_sockets
 
 REPO = Path(__file__).resolve().parents[1]
 
 
 def fake_checkout(
-    root: Path, vlm: list[str], url_env: bool = False, vlm_gate: bool = True, patched: bool = True
+    root: Path,
+    vlm: list[str],
+    url_env: bool = False,
+    vlm_gate: bool = True,
+    patched: bool = True,
+    sockets: bool = True,
 ) -> Path:
     """A directory shaped like a CaP-X checkout, with just the files the preflight reads.
 
     ``vlm_gate``: ``needs_visual`` in trial.py reads ``VLM_MODELS`` (ASPIRE) or the config alone (geniac_prize).
     ``patched``: runner.py reads CAPX_TRIAL_TIMEOUT_S and launch_utils.py writes the VDM text files.
+    ``sockets``: the servers listen only on Unix sockets (utils/unix_http.py exists: geniac_prize_2026_code);
+    without it the tree is one that uses TCP ports (ASPIRE).
     """
     pkg = root / "capx"
     for rel in ("envs", "llm", "utils", "integrations/vision", "integrations/motion"):
@@ -38,6 +45,8 @@ def fake_checkout(
     (pkg / "envs" / "runner.py").write_text("os.environ.get('CAPX_TRIAL_TIMEOUT_S')\n" if patched else "1000\n")
     (pkg / "utils" / "launch_utils.py").write_text("differencing_feedback_\n" if patched else "\n")
     (pkg / "llm" / "client.py").write_text(f"GPT_MODELS = []\nVLM_MODELS = {vlm!r}\n")
+    if sockets:
+        (pkg / "utils" / "unix_http.py").write_text("# CAPX_SOCKET_DIR\n")
     env = (lambda n: f"SERVICE_URL = os.environ.get('{n}', 'x')\n") if url_env else (lambda n: "SERVICE_URL = 'x'\n")
     for f, n in (
         ("vision/sam3.py", "SAM3_SERVICE_URL"),
@@ -59,8 +68,16 @@ def default_port_config(tmp: Path) -> Path:
     return p
 
 
+def socket_config(tmp: Path) -> Path:
+    """The same config for geniac_prize_2026_code: each perception server on its socket file."""
+    p = tmp / "cube_lifting_sockets.yaml"
+    if not p.exists():
+        p.write_text(ports_to_sockets(default_port_config(tmp).read_text()))
+    return p
+
+
 def write_spec(tmp: Path, **over) -> Path:
-    cfg = str(default_port_config(tmp))
+    cfg = str(default_port_config(tmp) if over.get("unix_sockets") is False else socket_config(tmp))
     tpl = tmp / "tpl.jinja"
     tpl.write_text("{{ messages }}")
     spec = {
@@ -101,8 +118,20 @@ def test_collect_plan(tmp_path: Path, checkout: Path) -> None:
     ):
         assert flag in text, flag
     assert "enable_thinking" not in text
-    assert "export CAPX_VLM_URL=http://127.0.0.1:8110/v1" in text and "export CAPX_VLM_MODEL=Qwen/Qwen3.8-27B" in text
+    assert "export CAPX_VLM_URL=http+unix://qwen.sock/v1" in text and "export CAPX_VLM_MODEL=Qwen/Qwen3.8-27B" in text
+    assert "export LLM_BASE_URL=http+unix://qwen.sock/" in text
+    assert "export CAPX_MOLMO_URL=http+unix://molmo.sock/v1" in text
+    assert "--server-url http+unix://qwen.sock/v1/chat/completions" in text
+    assert "--visual-differencing-model-server-url http+unix://qwen.sock/v1/chat/completions" in text
     assert text.index("wait_up qwen") < text.index("starting molmo")
+    # no TCP port: the servers listen on socket files in a directory run.sh makes for this run
+    assert 'CAPX_SOCKET_DIR="$(mktemp -d /tmp/capx.XXXXXXXX)"' in text and "export CAPX_SOCKET_DIR" in text
+    assert '--uds "$CAPX_SOCKET_DIR/qwen.sock"' in text and '--uds "$CAPX_SOCKET_DIR/molmo.sock"' in text
+    assert "--host" not in text and "--port" not in text
+    assert "http://" not in text.replace("http://127.0.0.1/health", "")
+    assert 'wait_up qwen "${PIDS[-1]}" qwen ' in text and 'wait_up molmo "${PIDS[-1]}" molmo ' in text
+    assert 'curl -sf --unix-socket "$CAPX_SOCKET_DIR/$3.sock" http://127.0.0.1/health' in text
+    assert 'rm -rf "$CAPX_SOCKET_DIR"' in text
     # one config per segment, template byte-identical, a single resume_idx
     for start, end in ((301, 340), (351, 360)):
         cfg = tmp_path / "out" / f"seg_cube_lifting_{start}" / "cube_lifting.yaml"
@@ -111,7 +140,7 @@ def test_collect_plan(tmp_path: Path, checkout: Path) -> None:
             f"\ntrials: {end}\n" in body and body.count("resume_idx:") == 1 and body.endswith(f"resume_idx: {start}\n")
         )
         assert yaml_template(cfg) == yaml_template(REAL / "cube_lifting.yaml")
-    assert "port: 8114" in body
+    assert "socket: sam3.sock" in body and "port:" not in body
     src = yaml.safe_load((tmp_path / "out" / "sources.yaml").read_text())["sources"]
     assert [s["trials_dir"].endswith("outputs/Qwen_Qwen3.8-27B/cube_lifting") for s in src] == [True, True]
     if shutil.which("bash"):
@@ -154,13 +183,42 @@ def test_unpatched_tree_is_refused(tmp_path: Path) -> None:
     assert not (tmp_path / "out").exists()
 
 
+def test_servers_with_local_weights_start_in_a_network_namespace(tmp_path: Path, checkout: Path) -> None:
+    """vLLM's engine opens TCP ports of its own; in a namespace without a network nobody on the node reaches them."""
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    text = write_plan(load_spec(write_spec(tmp_path, model_path=str(weights)))).read_text()
+    assert "unshare -r -n sh -c 'ip link set lo up; exec \"$@\"' sh)" in text and "HF_HUB_OFFLINE=1" in text
+    subprocess.run(["bash", "-n", str(tmp_path / "out" / "run.sh")], check=True)
+    launches = [ln for ln in text.splitlines() if "vllm.entrypoints.openai.api_server" in ln]
+    isolated = '( umask 077; exec ${ISOLATE[@]+"${ISOLATE[@]}"} "$SERVE_PY" '
+    # Qwen has local weights; Molmo comes from the Hub, which the namespace cannot reach
+    assert launches[0].startswith(isolated) and not launches[1].startswith(isolated)
+    assert launches[1].startswith('( umask 077; exec "$SERVE_PY" ')
+    assert "WARNING: molmo loads allenai/Molmo2-8B from the Hub" in text and "WARNING: qwen loads" not in text
+
+
+def test_tree_without_socket_support_is_refused(tmp_path: Path) -> None:
+    fake_checkout(tmp_path / "capx_root", ["Qwen/Qwen3.8-27B"], sockets=False)
+    with pytest.raises(PreflightError, match=r"no utils/unix_http\.py"):
+        write_plan(load_spec(write_spec(tmp_path)))
+    assert not (tmp_path / "out").exists()
+    # TCP ports only when asked for, and the script says so
+    text = write_plan(load_spec(write_spec(tmp_path, unix_sockets=False))).read_text()
+    assert "--host 127.0.0.1 --port 8110" in text and "--uds" not in text and "mktemp" not in text
+    assert "CAPX_SOCKET_DIR" not in text and "--server-url http://127.0.0.1:8110/v1/chat/completions" in text
+    assert 'curl -sf "http://127.0.0.1:$3/health"' in text and "WARNING: unix_sockets is false" in text
+    if shutil.which("bash"):
+        subprocess.run(["bash", "-n", str(tmp_path / "out" / "run.sh")], check=True)
+
+
 def test_read_vlm_models(checkout: Path) -> None:
     assert read_vlm_models(checkout / "capx") == ["Qwen/Qwen3.8-27B"]
 
 
 def test_collect_needs_saved_prompts(tmp_path: Path, checkout: Path) -> None:
     cfg = tmp_path / "c.yaml"
-    cfg.write_text(default_port_config(tmp_path).read_text().replace("save_multiturn_prompts: true", ""))
+    cfg.write_text(socket_config(tmp_path).read_text().replace("save_multiturn_prompts: true", ""))
     spec = write_spec(tmp_path, tasks=[{"task": "cube_lifting", "config": str(cfg), "seeds": ["301-302"]}])
     with pytest.raises(PreflightError, match="save_multiturn_prompts"):
         write_plan(load_spec(spec))
@@ -171,7 +229,7 @@ def test_collect_needs_saved_prompts(tmp_path: Path, checkout: Path) -> None:
     [("cube_lifting", "395-401"), ("libero_spatial_on_stove", "335-345"), ("cube_lifting", "0-3")],
 )
 def test_collect_seed_guard(tmp_path: Path, checkout: Path, task: str, seeds: str) -> None:
-    t = {"task": task, "config": str(default_port_config(tmp_path)), "seeds": [seeds]}
+    t = {"task": task, "config": str(socket_config(tmp_path)), "seeds": [seeds]}
     if task.startswith("libero_"):
         t["layouts"] = 50
     spec = write_spec(tmp_path, tasks=[t])
@@ -185,24 +243,47 @@ def test_chat_template_is_required(tmp_path: Path, checkout: Path) -> None:
         write_plan(load_spec(spec))
 
 
-def test_config_ports_must_match_the_clients(tmp_path: Path, checkout: Path) -> None:
+def test_socket_only_tree_refuses_tcp(tmp_path: Path, checkout: Path) -> None:
+    """geniac_prize_2026_code has no TCP mode: unix_sockets: false, port offsets and port configs are errors."""
+    with pytest.raises(PreflightError, match="unix_sockets: true"):
+        write_plan(load_spec(write_spec(tmp_path, unix_sockets=False)))
+    for moved in ({"port_offset": 50000}, {"vllm_port_offset": 50000}):
+        with pytest.raises(PreflightError, match="own socket directory"):
+            write_plan(load_spec(write_spec(tmp_path, **moved)))
+    task = {"task": "cube_lifting", "seeds": ["301-302"]}
+    with pytest.raises(PreflightError, match="sets host and port"):
+        write_plan(load_spec(write_spec(tmp_path, tasks=[task | {"config": str(default_port_config(tmp_path))}])))
+    wrong = tmp_path / "wrong.yaml"
+    wrong.write_text(socket_config(tmp_path).read_text().replace("socket: sam3.sock", "socket: sam.sock"))
+    with pytest.raises(PreflightError, match=r"its client sends to sam3\.sock"):
+        write_plan(load_spec(write_spec(tmp_path, tasks=[task | {"config": str(wrong)}])))
+    assert not (tmp_path / "out").exists()
+
+
+def test_config_ports_must_match_the_clients(tmp_path: Path) -> None:
+    fake_checkout(tmp_path / "capx_root", ["Qwen/Qwen3.8-27B"], sockets=False)
     spec = write_spec(
-        tmp_path, tasks=[{"task": "cube_lifting", "config": str(REAL / "cube_lifting.yaml"), "seeds": ["301-302"]}]
+        tmp_path,
+        unix_sockets=False,
+        tasks=[{"task": "cube_lifting", "config": str(REAL / "cube_lifting.yaml"), "seeds": ["301-302"]}],
     )
     with pytest.raises(PreflightError, match="client expects 8114"):
         write_plan(load_spec(spec))
 
 
-def test_moved_ports_need_env_urls(tmp_path: Path, checkout: Path) -> None:
+def test_moved_ports_need_env_urls(tmp_path: Path) -> None:
+    fake_checkout(tmp_path / "capx_root", ["Qwen/Qwen3.8-27B"], sockets=False)
     with pytest.raises(PreflightError, match="hard-codes"):
-        write_plan(load_spec(write_spec(tmp_path, port_offset=50000)))
-    fake_checkout(tmp_path / "capx_root", ["Qwen/Qwen3.8-27B"], url_env=True)
-    text = write_plan(load_spec(write_spec(tmp_path, port_offset=50000, vllm_port_offset=50000))).read_text()
+        write_plan(load_spec(write_spec(tmp_path, unix_sockets=False, port_offset=50000)))
+    fake_checkout(tmp_path / "capx_root", ["Qwen/Qwen3.8-27B"], sockets=False, url_env=True)
+    text = write_plan(
+        load_spec(write_spec(tmp_path, unix_sockets=False, port_offset=50000, vllm_port_offset=50000))
+    ).read_text()
     assert "SAM3_SERVICE_URL=http://127.0.0.1:58114" in text and "--port 58110" in text
 
 
 def _eval_spec(tmp: Path, **over) -> Path:
-    cfg = str(default_port_config(tmp))
+    cfg = str(socket_config(tmp))
     base = {
         "mode": "eval",
         "tasks": [
@@ -217,11 +298,12 @@ def _eval_spec(tmp: Path, **over) -> Path:
 def test_eval_plan_base_and_lora(tmp_path: Path, checkout: Path) -> None:
     text = write_plan(load_spec(_eval_spec(tmp_path))).read_text()
     vdm, code, molmo = [ln for ln in text.splitlines() if "api_server" in ln]
-    assert "--reasoning-parser qwen3" in vdm and "--port 8110" in vdm and "--gpu-memory-utilization 0.3" in vdm
-    assert "--reasoning-parser" not in code and "--port 8111" in code
+    assert "--reasoning-parser qwen3" in vdm and "/vdm.sock" in vdm and "--gpu-memory-utilization 0.3" in vdm
+    assert "--reasoning-parser" not in code and "/code.sock" in code
     assert '{"enable_thinking": false}' in code and "--enable-lora" not in code
-    assert "--server-url http://127.0.0.1:8111/v1/chat/completions" in text
-    assert "--visual-differencing-model-server-url http://127.0.0.1:8110/v1/chat/completions" in text
+    assert "--server-url http+unix://code.sock/v1/chat/completions" in text
+    assert "--visual-differencing-model-server-url http+unix://vdm.sock/v1/chat/completions" in text
+    assert "export CAPX_VLM_URL=http+unix://vdm.sock/v1" in text
     assert "Molmo2-8B" in molmo
     adapter = tmp_path / "adapter"
     adapter.mkdir()
@@ -247,7 +329,7 @@ def test_eval_plan_base_and_lora(tmp_path: Path, checkout: Path) -> None:
     ],
 )
 def test_eval_seed_guard(tmp_path: Path, checkout: Path, task: str, seeds: str) -> None:
-    t = {"task": task, "config": str(default_port_config(tmp_path)), "seeds": [seeds]}
+    t = {"task": task, "config": str(socket_config(tmp_path)), "seeds": [seeds]}
     if task.startswith("libero_"):
         t["layouts"] = 50
     spec = _eval_spec(tmp_path, tasks=[t])
@@ -310,7 +392,7 @@ def test_score(tmp_path: Path) -> None:
 
 
 def test_libero_tasks_need_layouts(tmp_path: Path, checkout: Path) -> None:
-    cfg = str(default_port_config(tmp_path))
+    cfg = str(socket_config(tmp_path))
     spec = write_spec(tmp_path, tasks=[{"task": "libero_goal_drawer", "config": cfg, "seeds": ["301-310"]}])
     with pytest.raises(PreflightError, match="layouts"):
         write_plan(load_spec(spec))

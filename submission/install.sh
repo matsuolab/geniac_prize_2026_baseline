@@ -3,7 +3,8 @@
 # Run from %post of the image definition, with this directory copied into the image:
 #   bash /opt/baseline-submission/install.sh [capx_root]          (default: /workspace/capx)
 # It
-#   1. applies skill-library.patch (patches/geniac_prize/, copied next to this script): ASPIRE's 14 LIBERO skills
+#   1. applies skill-library.patch (patches/geniac_prize/, copied next to this script): ASPIRE's 14 LIBERO skills,
+#      reaching the model server over its Unix socket
 #   2. applies trial-state.patch: each trial starts with the APIs' attributes as they were built (rulebook §8.4)
 #   3. copies gateway/*.yaml into env_configs/gateway/ (the baseline's APIs and prompts)
 #   4. adds task_map.yaml's entries to env_configs/gateway/runner.yaml
