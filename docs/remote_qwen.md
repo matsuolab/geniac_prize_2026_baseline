@@ -18,7 +18,7 @@ flowchart LR
       T --> L
     end
     O -. "切断しても継続" .-> C
-    T -- "gmo ログインノード経由の SSH" --> Q["Slurm バッチ: remote_qwen/serve.sh（Qwen vLLM）"]
+    T -- "gmo ログインノード経由の SSH" --> Q["Slurm バッチ: remote_qwen/serve.sh（Qwen vLLM、ソケット）"]
 ```
 
 ---
@@ -28,6 +28,10 @@ flowchart LR
 vLLM サーバー用の Slurm ジョブには、十分な **ホスト RAM（CPU メモリ）** が必要です。最低でも 64GiB を割り当てるようにしてください（`serve.sh` はそれより少ないと止まります）。
 
 vLLM は [installation.md](installation.md) の `.venv-serve`（`geniac_prize_2026_code/.venv-serve`）を使います。別の環境を使う場合は `SERVE_PY=<vLLM の python>` を指定します。
+
+> **計算ノードは他のチームと共有しています**（[チュートリアル 2 章](tutorial/02_slurm.md#ノードを他のチームと共有する)）。`127.0.0.1` のポートで立てたサーバーには、同じ計算ノードの他のユーザーも接続できます。そのため `serve.sh` は API を TCP のポートに出さず、自分だけが入れるディレクトリのソケット `/tmp/qwen-<ユーザー名>/qwen.sock` で Qwen を立てます。ソケットのファイルも所有者だけが使える権限で作ります。別の場所にするときは、`submit.sh`（`serve.sh`）と `tunnel.sh` の両方に同じ `QWEN_SOCKET` を指定します。
+>
+> vLLM のエンジンは、API とは別に内部の通信用の TCP のポートを開けます。`QWEN_MODEL_PATH` にローカルの snapshot を指定すると、`serve.sh` は vLLM をネットワークを切り離した名前空間の中で起動し、このポートにも同じノードから接続できなくなります。指定しない場合（Hub からダウンロードする場合）は名前空間を使えないので、警告を出して従来どおり起動します。
 
 ### バッチジョブとして投入する（推奨）
 
@@ -67,8 +71,10 @@ bash remote_qwen/serve.sh
 ログに vLLM が listen 状態になったことが表示されたら、計算ノード上で以下を実行し、レスポンスに `Qwen/Qwen3.8-27B` と `"max_model_len": 122880` が含まれていることを確認します：
 
 ```bash
-curl -fsS http://127.0.0.1:8000/v1/models | python -m json.tool
+curl -fsS --unix-socket /tmp/qwen-$(id -un)/qwen.sock http://127.0.0.1/v1/models | python -m json.tool
 ```
+
+`http://127.0.0.1` は HTTP のリクエストに書くだけのもので、接続には `--unix-socket` のソケットを使います。
 
 ---
 
@@ -121,6 +127,7 @@ bash remote_qwen/tunnel.sh GMO_ACCOUNT@QWEN_COMPUTE_NODE
 
 - トンネルは RTX 上で自動再接続されるため、作業用の Mac をスリープ・切断しても維持されます。様子は `tmux attach -t qwen_tunnel` で確認できます。
 - Qwen の Slurm ジョブを出し直して計算ノード名が変わった場合は、新しいノード名でトンネルを再起動してください。
+- トンネルは RTX の `127.0.0.1:8000` を、計算ノードのソケット（`/tmp/qwen-<ユーザー名>/qwen.sock`）へ転送します。RTX 側のポートは `QWEN_PORT` で変えられます。
 - RTX の 8000 番ポートを別のトンネル（`aspire_qwen_tunnel` など）が使っていると接続に失敗し続けます。先にそちらを止めてください。
 
 ### ③ トンネル経由の疎通確認
