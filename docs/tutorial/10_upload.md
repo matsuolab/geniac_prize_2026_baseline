@@ -220,7 +220,7 @@ CaP-Agent0 の構成のまま、[8 章](08_train.md)で学習した adapter(`run
    patch agent0-entrypoint.sh <<'EOF'
    --- agent0-entrypoint.sh
    +++ agent0-entrypoint.sh
-   @@ -31,6 +31,19 @@
+   @@ -32,6 +32,19 @@
     
     MODEL="${CAPX_MODEL:-Qwen/Qwen3.6-27B}"
     MODEL_PATH="${CAPX_MODEL_PATH:-${MODEL}}"
@@ -239,19 +239,19 @@ CaP-Agent0 の構成のまま、[8 章](08_train.md)で学習した adapter(`run
    +fi
     RUNNER_CONFIG="${CAPX_RUNNER_CONFIG:-env_configs/gateway/runner.yaml}"
     [[ "${RUNNER_CONFIG}" = /* ]] || RUNNER_CONFIG="/workspace/capx/${RUNNER_CONFIG}"
-    PORT="${CAPX_SERVE_PORT:-8110}"
-   @@ -89,6 +102,7 @@
+    export CAPX_SOCKET_DIR="$(realpath -m "${CAPX_SOCKET_DIR:-${HOME}/.capx/sockets}")"
+   @@ -98,6 +111,7 @@
     export CAPX_MOLMO_MODEL="${CAPX_MOLMO_MODEL:-${MODEL}}"
     
-    echo "[agent0] serving ${MODEL} from ${MODEL_PATH} on 127.0.0.1:${PORT}"
+    echo "[agent0] serving ${MODEL} from ${MODEL_PATH} on ${MODEL_SOCKET}"
    +echo "[agent0] agent model: ${AGENT_MODEL} (adapter: ${ADAPTER_PATH:-none})"
     echo "[agent0] fallback localizer -> ${CAPX_MOLMO_URL} (${CAPX_MOLMO_MODEL})"
     # fp8 on the fly keeps a 27B inside a single card's budget alongside the sim's
     # rendering context; it needs compute capability >= 8.9 (Ada/Hopper/Blackwell).
-   @@ -97,12 +111,13 @@
+   @@ -117,12 +131,13 @@
+        --model "${MODEL_PATH}" \
         --served-model-name "${MODEL}" \
-        --host 127.0.0.1 \
-        --port "${PORT}" \
+        --uds "${MODEL_SOCKET}" \
    -    --quantization fp8 \
    +    "${QUANT_ARGS[@]}" \
         --kv-cache-dtype fp8 \
@@ -261,15 +261,15 @@ CaP-Agent0 の構成のまま、[8 章](08_train.md)で学習した adapter(`run
         ${EAGER_FLAG} \
    +    "${LORA_ARGS[@]}" \
         --reasoning-parser qwen3 \
-        ${SERVE_EXTRA_ARGS} > "${LOGS}/vllm.log" 2>&1 &
+        ${SERVE_EXTRA_ARGS} ) > "${LOGS}/vllm.log" 2>&1 &
     SERVE_PID=$!
-   @@ -144,7 +159,7 @@
+   @@ -165,7 +180,7 @@
     # are the ones served above; flags passed to the container come after and win.
     python -m capx.submission.run \
         --config-path "${RUNNER_CONFIG}" \
    -    --model "${MODEL}" \
    +    --model "${AGENT_MODEL}" \
-        --server-url "http://127.0.0.1:${PORT}/v1/chat/completions" \
+        --server-url "http+unix://model.sock/v1/chat/completions" \
         --output-dir "${OUT}" "$@" &
     RUNNER_PID=$!
    EOF
@@ -376,7 +376,7 @@ CaP-Agent0 の構成のまま、[8 章](08_train.md)で学習した adapter(`run
      CAPX_MODEL_PATH: /models/qwen3.8-27b
      CAPX_ADAPTER_PATH: /models/adapter
      CAPX_SAM3_CHECKPOINT: /models/sam3/sam3.pt
-     CAPX_VLM_URL: http://127.0.0.1:8110/v1    # LIBERO の skill が物の位置を聞く VLM(CAPX_MODEL と同じモデル)
+     CAPX_VLM_URL: http+unix://model.sock/v1   # LIBERO の skill が物の位置を聞く VLM(CAPX_MODEL と同じモデルのソケット)
      CAPX_VLM_MODEL: Qwen/Qwen3.8-27B
    ```
 

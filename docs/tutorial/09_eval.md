@@ -61,9 +61,8 @@
      Hugging Face から重みを取りに行く。
    - seed は評価用の物しか使えない(Robosuite は 401-450、LIBERO-PRO は [eval.md](../eval.md) の Seeds)。それ以外は
      次の `eval plan` が止める。
-   - 評価のサーバーは port 8110、8111、8122、8113-8117 を使う。同じ計算ノードで他の人の評価や収集が動いている時は、
-     [7 章](07_collect.md)の「[run spec を作る](07_collect.md#run-spec-を作る)」と同じように `port_offset` と `vllm_port_offset` をずらし、他の人と
-     違う値にする。
+   - 評価のサーバーも、[7 章](07_collect.md)と同じく TCP のポートではなく、実行ごとに作る自分だけのディレクトリの
+     ソケットで待ち受ける。adapter を載せたコード生成のサーバーにも、同じ計算ノードの他のユーザーは接続できない。
 
 2. ログインノードで計画と点検をする。`[plan] wrote` の行が出れば、`runs/eval_smoke/` に `run.sh`、`plan.json`、
    seed の区間ごとの `seg_*/` ができている。
@@ -115,11 +114,11 @@
    ログには次の行が順に出る。
 
    ```text
-   [run] starting vdm on :8110
+   [run] starting vdm on /tmp/capx.XXXXXXXX/vdm.sock
    [run] vdm ready after ...s
-   [run] starting code on :8111
+   [run] starting code on /tmp/capx.XXXXXXXX/code.sock
    [run] code ready after ...s
-   [run] starting molmo on :8122
+   [run] starting molmo on /tmp/capx.XXXXXXXX/molmo.sock
    [run] molmo ready after ...s
    [run] cube_lifting:401-402
    [run] cube_lifting:401-402 rc=0

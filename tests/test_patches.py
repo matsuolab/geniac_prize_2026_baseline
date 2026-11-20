@@ -13,7 +13,7 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-from geniac_baseline.collect.preflight import _URL_ENV, LIBERO_ADDED_SKILLS
+from geniac_baseline.collect.preflight import LIBERO_ADDED_SKILLS
 from geniac_baseline.data import discover_trials, load_sources, write_rows
 from geniac_baseline.data.tag import read_jsonl
 
@@ -66,12 +66,11 @@ def test_patched_writer_output_converts_like_the_baseline_data(real_fixture: Pat
     assert got == want
 
 
-def test_patch_url_env_names_match_the_preflight_check() -> None:
-    for rel, env, port in _URL_ENV.values():
-        if rel == "vision/graspnet.py":  # already reads GRASPNET_SERVICE_URL; not in the patch
-            continue
-        hunk = _file_hunks(f"capx/integrations/{rel}")
-        assert re.search(rf'^\+\w+ = os\.environ\.get\("{env}", "http://127\.0\.0\.1:{port}"\)$', hunk, re.M), rel
+def test_patch_leaves_the_server_addresses_alone() -> None:
+    """The clients' server addresses are geniac_prize_2026_code's own socket names; no hunk moves them."""
+    paths = re.findall(r"^\+\+\+ b/(\S+)$", PATCH.read_text(), re.M)
+    assert not any(p.startswith(("capx/integrations/vision/", "capx/integrations/motion/")) for p in paths)
+    assert "SERVICE_URL" not in PATCH.read_text() and "127.0.0.1" not in PATCH.read_text()
 
 
 def test_patch_targets_capx_files_only() -> None:
@@ -88,10 +87,21 @@ def test_skill_patch_targets_the_libero_skill_library_only() -> None:
     assert re.findall(r"^\+\+\+ b/(\S+)$", SKILL_PATCH.read_text(), re.M) == [f"capx/{SKILL_LIB}"]
 
 
+SOCKET_IMPORT = "from capx.utils import unix_http_client"
+
+
+def _as_aspire(added: list[str]) -> list[str]:
+    """The skill patch's added lines without its one change: the model call goes over the Unix socket."""
+    lines = [ln for ln in added if ln != SOCKET_IMPORT and "which plain requests cannot send to" not in ln]
+    return [ln.replace("unix_http_client.post(", "requests.post(") for ln in lines]
+
+
 def test_skill_patch_adds_what_the_aspire_patch_added() -> None:
-    """The base files differ only in ASPIRE's license header, so the same added lines give the baseline's skills."""
+    """The base files differ only in ASPIRE's license header, so the same added lines give the baseline's skills.
+
+    The one difference is the transport of point_at_object's model call (test below)."""
     added = _added(f"capx/{SKILL_LIB}", SKILL_PATCH)
-    assert added == _added(f"aspire/sim/cap/{SKILL_LIB}", ASPIRE_PATCH)
+    assert _as_aspire(added) == _added(f"aspire/sim/cap/{SKILL_LIB}", ASPIRE_PATCH)
     registered = re.findall(r'^ {8}fns\["(\w+)"\] = self\.\1$', "\n".join(added), re.M)
     assert tuple(registered) == LIBERO_ADDED_SKILLS
 
@@ -103,3 +113,19 @@ def test_setup_script_applies_both_patches() -> None:
 
 def test_setup_script_parses() -> None:
     subprocess.run(["bash", "-n", str(PATCH.parent / "setup.sh")], check=True)
+
+
+def test_setup_applies_every_patch_in_the_directory() -> None:
+    setup = (PATCHES / "geniac_prize" / "setup.sh").read_text()
+    names = sorted(p.name for p in (PATCHES / "geniac_prize").glob("*.patch"))
+    assert names == ["geniac-prize.patch", "skill-library.patch"]
+    assert all(f'"$here/{n}"' in setup for n in names)
+
+
+def test_skill_patch_sends_its_model_call_over_the_socket() -> None:
+    """No added line posts with plain requests: CAPX_VLM_URL names a Unix socket, which requests cannot reach."""
+    added = _added(f"capx/{SKILL_LIB}", SKILL_PATCH)
+    aspire = _added(f"aspire/sim/cap/{SKILL_LIB}", ASPIRE_PATCH)
+    assert SOCKET_IMPORT in added
+    assert not any("requests.post(" in ln.replace("unix_http_client.post(", "") for ln in added)
+    assert sum("unix_http_client.post(" in ln for ln in added) == sum("requests.post(" in ln for ln in aspire) > 0

@@ -25,6 +25,34 @@ CODE_PORT = 8111
 MOLMO_PORT = 8122
 PERCEPTION_PORTS = (8113, 8114, 8115, 8116, 8117)
 
+# With unix_sockets (the default) no server takes requests on a TCP port: run.sh makes a directory only its user
+# can enter and exports it as CAPX_SOCKET_DIR. geniac_prize_2026_code's servers listen only on socket files in that
+# directory, and its clients address them as http+unix://<name>.sock/<path> (capx/utils/unix_http.py). The vLLM
+# servers started here follow the same rule: server <name> listens on $CAPX_SOCKET_DIR/<name>.sock (vLLM --uds).
+# The ports above are only used with unix_sockets: false (the ASPIRE tree).
+SOCKET_DIR = "$CAPX_SOCKET_DIR"
+# api_servers launcher -> the socket name its client in capx/integrations/* sends to
+PERCEPTION_SOCKETS = {
+    "launch_sam3_server": "sam3.sock",
+    "launch_sam2_server": "sam2.sock",
+    "launch_contact_graspnet_server": "graspnet.sock",
+    "launch_pyroki_server": "pyroki.sock",
+    "launch_owlvit_server": "owlvit.sock",
+    "launch_curobo_server": "curobo.sock",
+}
+
+
+def unix_url(name: str, path: str = "") -> str:
+    """URL of ``path`` on the server whose socket is ``<name>.sock`` in CAPX_SOCKET_DIR."""
+    return f"http+unix://{name}.sock{path}"
+
+
+def shell_arg(x: object) -> str:
+    """Quote one argument for run.sh; a socket path keeps its $CAPX_SOCKET_DIR for the shell to expand."""
+    s = str(x)
+    return f'"{s}"' if s.startswith(SOCKET_DIR + "/") else shlex.quote(s)
+
+
 # Launch arguments.
 # temperature: inert under use_parallel_ensemble (candidates use 0.1..0.9 and synthesis 0.2,
 #   capx/llm/client.py SINGLE_MODEL_ENSEMBLE_TEMPERATURES L68, synthesis L633); only used for single calls.
@@ -72,16 +100,18 @@ class VllmServer:
     lora_modules: dict[str, str] = field(default_factory=dict)
     max_lora_rank: int | None = None
     extra_flags: tuple[str, ...] = ()
+    unix_socket: bool = False  # listen on $CAPX_SOCKET_DIR/<name>.sock instead of 127.0.0.1:<port>
 
     def argv(self, python: str) -> list[str]:
         a = [
             python,
             "-m",
             "vllm.entrypoints.openai.api_server",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(self.port),
+            *(
+                ["--uds", f"{SOCKET_DIR}/{self.name}.sock"]
+                if self.unix_socket
+                else ["--host", "127.0.0.1", "--port", str(self.port)]
+            ),
             "--model",
             self.model,
             "--served-model-name",
@@ -125,7 +155,7 @@ class VllmServer:
         return a
 
     def shell(self, python: str) -> str:
-        return " ".join(shlex.quote(x) for x in self.argv(python))
+        return " ".join(shell_arg(x) for x in self.argv(python))
 
 
 def qwen_server(

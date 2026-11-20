@@ -91,14 +91,10 @@
 
    GMO クラウドの GPU は B300 なので、`b300_workarounds` を true にする。
 
-3. 通常は以上の設定で動く。ただし、同じ計算ノードで他の人が既定のポートを使っている場合、衝突を避けるためポート番号をずらす必要がある。
+3. 通常は以上の設定で動く。計算ノードは他のチームとも共有しているが `run.sh` のサーバーは TCP のポートで待ち受けない。実行のたびに
+   自分だけが入れるディレクトリ中のソケットで待ち受けるので、同じ計算ノードの他のユーザーは接続できず競合もしない。
 
-   ```yaml
-   port_offset: 300
-   vllm_port_offset: 300
-   ```
-
-   また、小規模でテストしたい場合はtasksの項を編集する。
+   小規模でテストしたい場合はtasksの項を編集する。
 
    - `tasks:`: 1 項目が 1 タスクである。
 
@@ -141,7 +137,7 @@ cd <共用ストレージ>/<ユーザー名>/geniac_prize_2026_baseline
 [plan] run it on a GPU node: bash .../runs/collect_libero/run.sh
 ```
 
-モデル、`save_multiturn_prompts`、seed、ポート、chat template のどれかに問題があれば、何も書かずに止まる。
+モデル、`save_multiturn_prompts`、seed、サーバーのソケット、chat template のどれかに問題があれば、何も書かずに止まる。
 `output_dir` を作り直す時は、古い物を消してから実行する。
 
 ## 収集を流す
@@ -187,9 +183,9 @@ cd <共用ストレージ>/<ユーザー名>/geniac_prize_2026_baseline
    区間ごとの終了が出る。
 
    ```text
-   [run] starting qwen on :8110
+   [run] starting qwen on /tmp/capx.XXXXXXXX/qwen.sock
    [run] qwen ready after 250s
-   [run] starting molmo on :8122
+   [run] starting molmo on /tmp/capx.XXXXXXXX/molmo.sock
    [run] molmo ready after 120s
    [run] libero_goal_bowl_on_stove:301-308
    [run] libero_goal_bowl_on_stove:301-308 rc=0

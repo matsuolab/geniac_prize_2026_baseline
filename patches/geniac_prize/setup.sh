@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Build the CaP-X tree for collection and evaluation: the competition code
-# (matsuolab/geniac_prize_2026_code at the commit below) + the two patches in patches/geniac_prize/, with the
+# (matsuolab/geniac_prize_2026_code at the commit below) + the patches in patches/geniac_prize/, with the
 # submodules the baseline uses:
-#   geniac-prize.patch    fixes the runs depend on (trial time limit, VDM text files, LIBERO path, server URLs)
-#   skill-library.patch   ASPIRE's 14 LIBERO skills, which the baseline's LIBERO data calls
+#   geniac-prize.patch    fixes the runs depend on (trial time limit, VDM text files, LIBERO path)
+#   skill-library.patch   ASPIRE's 14 LIBERO skills, which the baseline's LIBERO data calls. They reach the model
+#                         server over its Unix socket, like the rest of the code (its servers listen on socket
+#                         files in CAPX_SOCKET_DIR, never on TCP ports)
 #   bash patches/geniac_prize/setup.sh [target_dir]          (default: ./geniac_prize_2026_code)
 # GENIAC_PRIZE_URL overrides the clone URL (SSH by default while the repository is private; switch to HTTPS once
 # it is public). The venvs are then made per docs/installation.md.
@@ -12,7 +14,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 patches=("$here/geniac-prize.patch" "$here/skill-library.patch")
 target="${1:-geniac_prize_2026_code}"
 url="${GENIAC_PRIZE_URL:-git@github.com:matsuolab/geniac_prize_2026_code.git}"
-commit=ac680843fb60c464aa74c87a2815cb5917865be4
+commit=4ea0b161257c003e19f15c511547fd156a8d590c
 # BEHAVIOR (b1k) runs on a separate server at evaluation time; private is not public.
 submodules=(
   capx/third_party/robosuite

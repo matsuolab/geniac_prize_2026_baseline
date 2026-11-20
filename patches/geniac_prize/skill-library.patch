@@ -1,5 +1,5 @@
 diff --git a/capx/integrations/franka/libero_reduced_skill_library.py b/capx/integrations/franka/libero_reduced_skill_library.py
-index 63cc1b4..a5e8330 100644
+index 63cc1b4..a431fdb 100644
 --- a/capx/integrations/franka/libero_reduced_skill_library.py
 +++ b/capx/integrations/franka/libero_reduced_skill_library.py
 @@ -1,9 +1,15 @@
@@ -18,7 +18,15 @@ index 63cc1b4..a5e8330 100644
  import open3d as o3d
  import viser.transforms as vtf
  from PIL import Image, ImageDraw
-@@ -51,6 +57,21 @@ class FrankaLiberoApiReducedSkillLibrary(FrankaLiberoApiReduced):
+@@ -24,6 +30,7 @@ from capx.integrations.motion.pyroki_context import get_pyroki_context  # type:
+ 
+ # from capx.integrations.vision.sam2 import init_sam2
+ from capx.integrations.vision.sam3 import init_sam3, init_sam3_point_prompt
++from capx.utils import unix_http_client
+ from capx.utils.camera_utils import obs_get_rgb
+ from capx.utils.depth_utils import depth_color_to_pointcloud, depth_to_pointcloud, depth_to_rgb
+ 
+@@ -51,6 +58,21 @@ class FrankaLiberoApiReducedSkillLibrary(FrankaLiberoApiReduced):
          fns["interpolate_segment"] = self.interpolate_segment
          fns["normalize_vector"] = self.normalize_vector
          fns["select_top_down_grasp"] = self.select_top_down_grasp
@@ -40,7 +48,7 @@ index 63cc1b4..a5e8330 100644
  
          return fns
  
-@@ -363,3 +384,634 @@ class FrankaLiberoApiReducedSkillLibrary(FrankaLiberoApiReduced):
+@@ -363,3 +385,635 @@ class FrankaLiberoApiReducedSkillLibrary(FrankaLiberoApiReduced):
                      best_grasp = g_world
  
          return best_grasp, best_score
@@ -119,7 +127,8 @@ index 63cc1b4..a5e8330 100644
 +            ]}],
 +        }
 +        try:
-+            r = requests.post(f"{url.rstrip('/')}/chat/completions", json=payload, timeout=120)
++            # CAPX_VLM_URL names a Unix socket (http+unix://<socket>/v1), which plain requests cannot send to
++            r = unix_http_client.post(f"{url.rstrip('/')}/chat/completions", json=payload, timeout=120)
 +            r.raise_for_status()
 +            text = r.json()["choices"][0]["message"].get("content") or ""
 +        except Exception:
