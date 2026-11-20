@@ -66,4 +66,4 @@ fi
 echo "[serve] $(hostname) job ${SLURM_JOB_ID:-none}: Qwen/Qwen3.8-27B on $sock"
 # The socket file takes its mode from the umask: owner only, like the directory it is in.
 umask 077
-exec${isolate[@]+"${isolate[@]}"} "$serve_py" -m vllm.entrypoints.openai.api_server "${args[@]}"
+exec ${isolate[@]+"${isolate[@]}"} "$serve_py" -m vllm.entrypoints.openai.api_server "${args[@]}"
