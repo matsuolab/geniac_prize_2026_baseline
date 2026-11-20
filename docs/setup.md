@@ -57,59 +57,33 @@ trial の実時間上限は run spec の `trial_timeout_s`(既定 2400 s、ベ�
 
 ### Unix sockets
 
-計算ノードは他のチームと共有していて、`127.0.0.1` のポートで待ち受けるサーバーには、同じノードの他のユーザーも接続できる
-([tutorial の 2 章](tutorial/02_slurm.md#ノードを他のチームと共有する))。固定する commit のコンペの CaP-X は、手元の
-サーバーを TCP のポートでは立てず、Unix ドメインソケット(ソケットファイル)だけで立てる(`capx/utils/unix_http.py`)。
+計算ノードは他のチームと共有していて、`127.0.0.1` のポートで立てたサーバーには他のユーザーも接続できる
+([tutorial の 2 章](tutorial/02_slurm.md#ノードを他のチームと共有する))。そのためサーバーはすべて、ポートではなく
+Unix ドメインソケットで立てる。
 
-- サーバー(SAM3、SAM2、Contact-GraspNet、PyRoKi、cuRobo、OWL-ViT、LLM のプロキシ)は、ソケットを置くディレクトリの中の
-  `<名前>.sock` で待ち受ける。ソケットは所有者だけが使える(`600`)。
-- クライアントは、サーバーを `http+unix://<名前>.sock/<path>` で指す。`http://` の URL はエラーになる(手元でない API は
-  `https://`)。
-- タスクの config の `api_servers` は、`host` と `port` の代わりに `socket: <名前>.sock` を書く。`host` や `port` を書くと
-  エラーになる。`configs/capx/geniac_prize/` の config はこの形にしてある。
+`run.sh` は実行のたびに自分だけが入れるディレクトリ(`/tmp/capx.XXXXXXXX`)を作り、その中の `<名前>.sock` で
+サーバーを立てて、終了時に消す。クライアントは `http+unix://<名前>.sock/<path>` で指し、タスクの config の
+`api_servers` には `socket: <名前>.sock` を書く。
 
-ソケットを置くディレクトリは、環境変数 `CAPX_SOCKET_DIR` で決まる(指定が無ければ `~/.capx/sockets`)。他のユーザーが
-入れるディレクトリ(権限が `700` でない、自分の物でない)は、エラーで止まる。
+| サーバー | ソケット |
+| --- | --- |
+| Qwen(収集) | `qwen.sock` |
+| Qwen(評価: VDM、コード生成) | `vdm.sock`、`code.sock` |
+| Molmo | `molmo.sock` |
+| SAM3、Contact-GraspNet、PyRoKi など | `sam3.sock`、`graspnet.sock`、`pyroki.sock` など |
 
-`run.sh` は実行のたびに `mktemp -d /tmp/capx.XXXXXXXX`(権限 `700`)でディレクトリを作り、`CAPX_SOCKET_DIR` として
-export して、終了時にディレクトリごと消す。ディレクトリに入れるのは自分だけなので、他のユーザーはソケットに接続できない。
-ソケットは実行ごとに別なので、同じノードで複数の実行を並べても重ならない。ポートが無いので、run spec の `port_offset` と
-`vllm_port_offset` は 0 のままにする(0 以外は点検で止まる)。
-
-| サーバー | ソケット | 指す URL |
-| --- | --- | --- |
-| Qwen(収集: コード生成と VDM) | `qwen.sock` | `http+unix://qwen.sock/v1/chat/completions` |
-| Qwen(評価: VDM) | `vdm.sock` | `http+unix://vdm.sock/v1/chat/completions` |
-| Qwen(評価: コード生成) | `code.sock` | `http+unix://code.sock/v1/chat/completions` |
-| Molmo | `molmo.sock` | `http+unix://molmo.sock/v1`(`CAPX_MOLMO_URL`) |
-| SAM3、Contact-GraspNet、PyRoKi など | `sam3.sock`、`graspnet.sock`、`pyroki.sock` など | コンペの CaP-X のクライアントの既定 |
-
-vLLM は `--uds $CAPX_SOCKET_DIR/<名前>.sock` で立てる。実行中のサーバーには、`run.sh` のログに出るディレクトリを使って
-次のように問い合わせられる(`http://127.0.0.1` は HTTP のリクエストに書くだけの物で、接続にはソケットを使う)。
+実行中のサーバーには、次のように問い合わせられる(`http://127.0.0.1` は形式上の物で、接続にはソケットを使う)。
 
 ```bash
 curl --unix-socket /tmp/capx.XXXXXXXX/qwen.sock http://127.0.0.1/v1/models
 ```
 
-`skill-library.patch` が足す `point_at_object` は、VLM への問い合わせ(`CAPX_VLM_URL`)を、ソケットに送れるクライアント
-(`capx/utils/unix_http_client.py`)で送る。ASPIRE の patch が足した行との違いは、この 1 か所だけである。
+vLLM は `--uds` でも内部の通信用に TCP のポートを開けるので、`run.sh` は vLLM をネットワークを切り離した名前空間
+(`unshare -r -n`)の中で起動する。重みを Hub の ID で指定した場合と、ノードが名前空間を作らせない場合は、
+名前空間を使わずに起動して `WARNING` を出す。
 
-vLLM のエンジンのプロセスは、`--uds` で立てても TCP のポートをいくつか開ける(vLLM 0.26.0 と B300 で、サーバー 1 つに
-つき 7 個)。PyTorch の分散処理の初期化(`torch.distributed` の TCPStore と Gloo)が開ける物で、推論の API はそこには無く、
-ソケットだけにある。`VLLM_HOST_IP=127.0.0.1` を付けても、開ける場所は変わらない。
-
-このポートに同じノードの他のユーザーが接続できないように、`run.sh` は vLLM を、ネットワークを切り離した名前空間
-(`unshare -r -n`)の中で起動する。ポートはその名前空間の中にだけ開き、ノードからは見えない。ソケットはファイルなので、
-名前空間の外のクライアントからそのまま使える。次の 2 つの場合は名前空間を使わずに起動し、`run.sh` のログに
-`WARNING` を出す(API はどちらの場合もソケットだけにある)。
-
-- 重みを Hub の ID で指定している(`model_path` や `molmo_path` が `null`)。名前空間の中にはネットワークが無く、
-  ダウンロードできないためである。ローカルの snapshot を指定すれば、名前空間の中で起動する。
-- ノードが名前空間を作らせない(`unshare -r -n` が失敗する)。
-
-run spec の `unix_sockets: false` は、`127.0.0.1` のポートで立てる。ASPIRE の tree
-([reproduce_baseline.md](reproduce_baseline.md))はソケットに対応していないので、この設定が要る。他のユーザーがいる
-ノードでは使わない。コンペの CaP-X の tree では使えない(点検で止まる)。
+ASPIRE の tree([reproduce_baseline.md](reproduce_baseline.md))はソケットに対応していないので、run spec に
+`unix_sockets: false` を書いてポートで立てる。他のユーザーがいるノードでは使わない。
 
 ### Skill library
 

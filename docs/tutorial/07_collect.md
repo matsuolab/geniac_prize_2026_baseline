@@ -91,10 +91,8 @@
 
    GMO クラウドの GPU は B300 なので、`b300_workarounds` を true にする。
 
-3. 通常は以上の設定で動く。計算ノードは他のチームとも共有しているが
-   ([2 章](02_slurm.md#ノードを他のチームと共有する))、`run.sh` のサーバーは TCP のポートで待ち受けない。実行のたびに
-   自分だけが入れるディレクトリを作り、その中のソケットで待ち受けるので、同じ計算ノードの他のユーザーは接続できず、
-   他の実行と重なることも無い。`port_offset` と `vllm_port_offset` は 0 のままにする(0 以外は次の点検で止まる)。
+3. 通常は以上の設定で動く。計算ノードは他のチームとも共有しているが `run.sh` のサーバーは TCP のポートで待ち受けない。実行のたびに
+   自分だけが入れるディレクトリ中のソケットで待ち受けるので、同じ計算ノードの他のユーザーは接続できず競合もしない。
 
    小規模でテストしたい場合はtasksの項を編集する。
 
@@ -140,9 +138,6 @@ cd <共用ストレージ>/<ユーザー名>/geniac_prize_2026_baseline
 ```
 
 モデル、`save_multiturn_prompts`、seed、サーバーのソケット、chat template のどれかに問題があれば、何も書かずに止まる。
-`... has no utils/unix_http.py` で止まる時は、CaP-X の tree が古い。[4 章](04_install.md)の
-`bash patches/geniac_prize/setup.sh` で作り直す。`api_servers entry ... sets host and port` で止まる時は、タスクの
-config が古い形なので、`configs/capx/geniac_prize/` の config を使う([setup.md](../setup.md) の Unix sockets)。
 `output_dir` を作り直す時は、古い物を消してから実行する。
 
 ## 収集を流す

@@ -62,8 +62,7 @@
    - seed は評価用の物しか使えない(Robosuite は 401-450、LIBERO-PRO は [eval.md](../eval.md) の Seeds)。それ以外は
      次の `eval plan` が止める。
    - 評価のサーバーも、[7 章](07_collect.md)と同じく TCP のポートではなく、実行ごとに作る自分だけのディレクトリの
-     ソケットで待ち受ける。adapter を載せたコード生成のサーバーにも、同じ計算ノードの他のユーザーは接続できない
-     ([2 章](02_slurm.md#ノードを他のチームと共有する))。`port_offset` と `vllm_port_offset` は 0 のままにする。
+     ソケットで待ち受ける。adapter を載せたコード生成のサーバーにも、同じ計算ノードの他のユーザーは接続できない。
 
 2. ログインノードで計画と点検をする。`[plan] wrote` の行が出れば、`runs/eval_smoke/` に `run.sh`、`plan.json`、
    seed の区間ごとの `seg_*/` ができている。

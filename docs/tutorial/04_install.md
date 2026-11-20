@@ -97,8 +97,6 @@
    deactivate
 
    # vLLM: .venv-serve(Python 3.12)。--no-config でコンペの CaP-X の transformers<5.0 の制約を読まない。
-   # transformers は 5.22.2 に固定する(5.23.0 では vLLM 0.26.0 が Qwen3.8-27B の起動時に
-   # "Found 1 <|image_pad|> tokens in the text but no images were passed" で止まる)
    uv venv .venv-serve --python 3.12
    source .venv-serve/bin/activate
    uv pip install --no-config --torch-backend=cu130 vllm==0.26.0 transformers==5.22.2 huggingface_hub

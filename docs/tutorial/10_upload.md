@@ -279,11 +279,6 @@ CaP-Agent0 の構成のまま、[8 章](08_train.md)で学習した adapter(`run
    `patching file agent0-entrypoint.sh` の後に `ok` が出れば良い。`Hunk ... FAILED` が出た時は、geniac_prize_2026_code の
    起動スクリプトが変わっているので、上の表を見て手で直す。
 
-   起動スクリプトは vLLM を TCP のポートではなく、自分だけが入れるディレクトリのソケット
-   (`$CAPX_SOCKET_DIR/model.sock`、既定は `~/.capx/sockets`)で立てる。perception のサーバーも同じディレクトリの
-   ソケットで待ち受けるので、同じ計算ノードの他のユーザーは接続できない
-   ([2 章](02_slurm.md#ノードを他のチームと共有する))。
-
 3. 前の節の 2 番の image に、直した起動スクリプトを差し替え、学習時の skill library と task の prompt を入れる
    def ファイルを作る(`submission/install.sh` が行う。中身はその先頭のコメントにある)。
 
